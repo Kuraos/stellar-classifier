@@ -1,4 +1,8 @@
-"""Generacion del diagrama Hertzsprung-Russell (HR)."""
+"""Generacion del diagrama Hertzsprung-Russell (HR).
+
+El grafico invierte los ejes por convencion astronomica y colorea los puntos
+segun la temperatura efectiva.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,8 @@ SPECTRAL_BOUNDS = [30000, 10000, 7500, 6000, 5200, 3700]
 def plot_hr(df: pd.DataFrame, ax: Optional[plt.Axes] = None) -> plt.Figure:
     """Dibuja un diagrama HR usando T_eff y M_G.
 
-    Si se pasa `ax`, dibuja sobre ese eje para permitir embebido en Tkinter.
+    Si se pasa ax, dibuja sobre ese eje para permitir embebido en Tkinter y
+    devuelve la figura asociada al grafico.
     """
     required_cols = {"teff", "M_G"}
     missing = required_cols.difference(df.columns)

@@ -11,6 +11,7 @@ SPECTRAL_ORDER = ["O", "B", "A", "F", "G", "K", "M"]
 
 
 def _nan_summary(values: pd.Series) -> Dict[str, float]:
+    """Resume una serie numérica ignorando valores no finitos."""
     arr = values.to_numpy(dtype=float)
     return {
         "mean": float(np.nanmean(arr)),
@@ -59,6 +60,7 @@ def compute_statistics(df: pd.DataFrame) -> dict:
         "max": float(np.nanmax(df["luminosity_solar"].to_numpy(dtype=float))),
     }
 
+    # Conservamos el orden OBAFGKM para que el panel sea estable aunque falten clases.
     counts = (
         df["spectral_type"]
         .astype(str)

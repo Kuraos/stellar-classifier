@@ -113,6 +113,9 @@ def test_query_gaia_sample_writes_csv(monkeypatch, tmp_path) -> None:
     assert len(result) == 2
     assert output_file.exists()
     assert "ruwe < 1.4" in fake_gaia.last_query
+    assert "LEFT JOIN gaiadr3.astrophysical_parameters" in fake_gaia.last_query
+    assert "ap.lum_flame" in fake_gaia.last_query
+    assert "ap.radius_flame" in fake_gaia.last_query
 
     for col in download.REQUIRED_COLUMNS:
         assert col in result.columns

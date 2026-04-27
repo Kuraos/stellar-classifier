@@ -8,6 +8,7 @@ from scipy.optimize import curve_fit
 
 
 def _validate_arrays(wavelength: ArrayLike, flux: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
+    """Limpia, valida y ordena los vectores espectrales antes del ajuste."""
     x = np.asarray(wavelength, dtype=float)
     y = np.asarray(flux, dtype=float)
     if x.shape != y.shape:
@@ -41,7 +42,11 @@ def gaussian_absorption(
 
 
 def estimate_continuum(wavelength: ArrayLike, flux: ArrayLike, degree: int = 1) -> np.ndarray:
-    """Estima el continuo con un ajuste polinomial sobre puntos altos de flujo."""
+    """Estima el continuo con un ajuste polinomial sobre los puntos mas altos.
+
+    La heuristica toma el percentil 70 de flujo para evitar que la linea de
+    absorcion sesgue el ajuste del continuo.
+    """
     x, y = _validate_arrays(wavelength, flux)
 
     threshold = np.nanpercentile(y, 70)
@@ -54,7 +59,11 @@ def estimate_continuum(wavelength: ArrayLike, flux: ArrayLike, degree: int = 1) 
 
 
 def normalize_flux(wavelength: ArrayLike, flux: ArrayLike, degree: int = 1) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Normaliza el flujo respecto al continuo estimado."""
+    """Normaliza el flujo respecto al continuo estimado.
+
+    Retorna el eje espectral limpio, el flujo normalizado y el continuo usado
+    para la normalizacion.
+    """
     x, y = _validate_arrays(wavelength, flux)
     continuum = estimate_continuum(x, y, degree=degree)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -63,7 +72,7 @@ def normalize_flux(wavelength: ArrayLike, flux: ArrayLike, degree: int = 1) -> t
 
 
 def detect_line_center(wavelength: ArrayLike, flux: ArrayLike) -> float:
-    """Detecta el centro de linea como el minimo de flujo observado."""
+    """Detecta el centro de la linea como el minimo de flujo observado."""
     x, y = _validate_arrays(wavelength, flux)
     return float(x[np.argmin(y)])
 
@@ -122,6 +131,7 @@ def fit_absorption_line(
     fwhm = float(2.354820045 * sigma_fit)
     with np.errstate(divide="ignore", invalid="ignore"):
         ew_profile = 1.0 - (model_flux / continuum_fit)
+    # Integramos el perfil normalizado con la regla trapezoidal para obtener EW.
     equivalent_width = float(np.trapezoid(ew_profile, xw))
 
     rms = float(np.sqrt(np.mean((yw - model_flux) ** 2)))

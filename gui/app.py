@@ -1,4 +1,8 @@
-"""Aplicacion principal Tkinter para stellar-classifier."""
+"""Aplicacion principal Tkinter para stellar-classifier.
+
+La ventana coordina tres etapas: descarga desde Gaia, procesamiento fisico de
+las estrellas y visualizacion en tabla, panel de estadisticas y diagrama HR.
+"""
 
 from __future__ import annotations
 
@@ -25,15 +29,16 @@ from src.temperature import (
 
 
 class StellarClassifierApp:
-    """Ventana principal de la aplicacion."""
+    """Ventana principal y coordinadora del flujo de trabajo interactivo."""
 
     def __init__(self, root: tk.Tk):
+        """Construye la ventana, el estado interno y todos los widgets."""
         self.root = root
         self.root.title("stellar-classifier")
         self.root.geometry("1200x800")
         self.root.minsize(1024, 720)
 
-        # Estado interno requerido por el diseno.
+        # Estado interno compartido entre descarga, procesamiento, tabla y grafico.
         self.df_raw: pd.DataFrame | None = None
         self.df_processed: pd.DataFrame | None = None
         self.stats: dict | None = None
@@ -48,6 +53,7 @@ class StellarClassifierApp:
         self._build_layout()
 
     def _build_layout(self) -> None:
+        """Construye la disposicion general de la interfaz."""
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=3)
         self.root.rowconfigure(2, weight=2)
@@ -101,6 +107,7 @@ class StellarClassifierApp:
         self.status_bar.grid(row=3, column=0, sticky="ew")
 
     def _build_action_bar(self) -> None:
+        """Crea la barra superior con acciones y parametros de consulta."""
         action_bar = ttk.Frame(self.root)
         action_bar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
         action_bar.columnconfigure(99, weight=1)
@@ -126,15 +133,18 @@ class StellarClassifierApp:
         self.max_dist_entry.grid(row=0, column=7)
 
     def _set_status(self, text: str) -> None:
+        """Actualiza la barra inferior con un mensaje de estado."""
         self.status_bar.set_status(text)
 
     def _set_download_controls(self, enabled: bool) -> None:
+        """Habilita o deshabilita los controles que afectan a la descarga."""
         state = "normal" if enabled else "disabled"
         self.download_btn.configure(state=state)
         self.n_stars_entry.configure(state=state)
         self.max_dist_entry.configure(state=state)
 
     def _start_download(self) -> None:
+        """Valida la entrada y lanza la descarga en un hilo secundario."""
         if self._download_thread and self._download_thread.is_alive():
             self._set_status("descargando... espera a que termine")
             return
@@ -160,16 +170,20 @@ class StellarClassifierApp:
         self.root.after(100, self._poll_download_thread)
 
     def _poll_download_thread(self) -> None:
+        """Rehabilita los controles cuando termina la descarga en background."""
         if self._download_thread and self._download_thread.is_alive():
             self.root.after(100, self._poll_download_thread)
             return
         self._set_download_controls(True)
 
     def _download_worker(self, n_stars: int, max_dist: float) -> None:
+        """Ejecuta la consulta Gaia fuera del hilo principal de Tkinter."""
         try:
             df = query_gaia_sample(n_stars=n_stars, max_dist_pc=max_dist)
+            # Tkinter no es thread-safe: la actualizacion de la GUI vuelve al hilo principal.
             self.root.after(100, lambda: self._on_download_success(df))
         except Exception as exc:
+            # Igual para la rama de error, que debe mostrar el dialogo desde Tk.
             self.root.after(100, lambda: self._on_download_error(str(exc)))
 
     def _on_download_success(self, df: pd.DataFrame) -> None:
@@ -196,6 +210,7 @@ class StellarClassifierApp:
         messagebox.showerror("Error de descarga", message)
 
     def _process_data(self) -> None:
+        """Deriva magnitudes fisicas y actualiza la tabla y las estadisticas."""
         if self.df_raw is None or self.df_raw.empty:
             self._set_status("error: primero descarga datos")
             return
@@ -204,6 +219,7 @@ class StellarClassifierApp:
         try:
             df = self.df_raw.copy()
 
+            # Convertimos las columnas base en arreglos NumPy para vectorizar los calculos fisicos.
             parallax = df["parallax"].to_numpy(dtype=float)
             bp_rp = df["bp_rp"].to_numpy(dtype=float)
             g_mag = df["phot_g_mean_mag"].to_numpy(dtype=float)
@@ -224,6 +240,7 @@ class StellarClassifierApp:
 
             self.stats_panel.update_from_stats(self.stats)
 
+            # La tabla muestra solo las columnas derivadas mas utiles para revision rapida.
             table_cols = [
                 "source_id",
                 "ra",
@@ -246,6 +263,7 @@ class StellarClassifierApp:
             messagebox.showerror("Error de procesamiento", str(exc))
 
     def _plot_data(self) -> None:
+        """Dibuja o actualiza el diagrama HR con los datos ya procesados."""
         if self.df_processed is None or self.df_processed.empty:
             self._set_status("error: primero procesa datos")
             return
@@ -260,6 +278,7 @@ class StellarClassifierApp:
             messagebox.showerror("Error de grafica", str(exc))
 
     def _export_csv(self) -> None:
+        """Guarda el DataFrame procesado en results/stars_processed.csv."""
         if self.df_processed is None or self.df_processed.empty:
             self._set_status("error: no hay datos procesados para exportar")
             return

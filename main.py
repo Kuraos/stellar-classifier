@@ -1,9 +1,20 @@
+"""Punto de entrada de stellar-classifier.
+
+Este archivo crea la ventana principal de Tkinter y arranca el bucle de
+eventos de la aplicacion.
+"""
+
 import tkinter as tk
 
 from gui.app import StellarClassifierApp
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Inicializa la interfaz principal y ejecuta la aplicacion."""
     root = tk.Tk()
-    app = StellarClassifierApp(root)
+    StellarClassifierApp(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

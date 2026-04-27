@@ -1,4 +1,9 @@
-"""Descarga de una muestra estelar desde Gaia DR3 usando ADQL."""
+"""Descarga de una muestra estelar desde Gaia DR3 usando ADQL.
+
+La consulta combina gaiadr3.gaia_source con gaiadr3.astrophysical_parameters
+para recuperar magnitudes, paralaje y parametros estelares derivados como
+teff_gspphot, lum_flame y radius_flame.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +30,12 @@ REQUIRED_COLUMNS = [
 
 
 def _query_once_with_fallback(Gaia, query: str) -> pd.DataFrame:
-    """Intenta primero consulta asincrona y si falla usa consulta sincronica."""
+    """Ejecuta una consulta Gaia primero en modo asincrono y luego sincronico.
+
+    La API de astroquery suele preferir trabajos asincronos, pero Gaia puede
+    rechazar ese modo de forma transitoria. En ese caso intentamos el fallback
+    sincronico antes de propagar el error.
+    """
     async_error: Exception | None = None
 
     try:
@@ -51,39 +61,43 @@ def _query_once_with_fallback(Gaia, query: str) -> pd.DataFrame:
 
 
 def _validate_required_columns(df: pd.DataFrame) -> None:
+    """Verifica que el resultado contenga las columnas minimas del proyecto."""
     missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing:
         raise RuntimeError(f"Faltan columnas esperadas en Gaia DR3: {missing}")
 
 
 def _build_query(n_stars: int, max_dist_pc: float) -> str:
+    """Construye la consulta ADQL con filtros de calidad y el join astrofisico."""
     min_parallax = 1000.0 / max_dist_pc
     return f"""
     SELECT TOP {int(n_stars)}
-        source_id,
-        ra,
-        dec,
-        parallax,
-        parallax_error,
-        phot_g_mean_mag,
-        phot_bp_mean_mag,
-        phot_rp_mean_mag,
-        bp_rp,
-        teff_gspphot,
-        lum_flame,
-        radius_flame,
-        ruwe,
-        phot_bp_rp_excess_factor
-    FROM gaiadr3.gaia_source
-    WHERE parallax > {min_parallax}
-      AND parallax_error / parallax < 0.1
-      AND ruwe < 1.4
-      AND phot_bp_rp_excess_factor < 1.5
-      AND bp_rp IS NOT NULL
-      AND parallax IS NOT NULL
-      AND phot_g_mean_mag IS NOT NULL
-      AND phot_bp_mean_mag IS NOT NULL
-      AND phot_rp_mean_mag IS NOT NULL
+        gs.source_id,
+        gs.ra,
+        gs.dec,
+        gs.parallax,
+        gs.parallax_error,
+        gs.phot_g_mean_mag,
+        gs.phot_bp_mean_mag,
+        gs.phot_rp_mean_mag,
+        gs.bp_rp,
+        ap.teff_gspphot,
+        ap.lum_flame,
+        ap.radius_flame,
+        gs.ruwe,
+        gs.phot_bp_rp_excess_factor
+    FROM gaiadr3.gaia_source AS gs
+    LEFT JOIN gaiadr3.astrophysical_parameters AS ap
+        ON gs.source_id = ap.source_id
+    WHERE gs.parallax > {min_parallax}
+        AND gs.parallax_error / gs.parallax < 0.1
+        AND gs.ruwe < 1.4
+        AND gs.phot_bp_rp_excess_factor < 1.5
+        AND gs.bp_rp IS NOT NULL
+        AND gs.parallax IS NOT NULL
+        AND gs.phot_g_mean_mag IS NOT NULL
+        AND gs.phot_bp_mean_mag IS NOT NULL
+        AND gs.phot_rp_mean_mag IS NOT NULL
     """.strip()
 
 
@@ -114,6 +128,7 @@ def query_gaia_sample(n_stars: int = 5000, max_dist_pc: float = 100) -> pd.DataF
     max_retries = 3
     last_error: Exception | None = None
 
+    # Gaia puede devolver errores transitorios, asi que damos algunos reintentos cortos.
     for attempt in range(1, max_retries + 1):
         try:
             print(f"[Gaia] Ejecutando consulta (intento {attempt}/{max_retries})...")
