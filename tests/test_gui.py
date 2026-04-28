@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
 import tkinter as tk
 
 import numpy as np
@@ -153,3 +155,45 @@ def test_bayesian_plus_extinction_no_errors(monkeypatch, tk_root, sample_process
     # No debe lanzar excepcion
     app._process_data()
     assert app.df_processed is not None
+
+
+def _copy_isochrones_fixture_dir(tmp_path: Path) -> Path:
+    fixture_dir = Path(__file__).resolve().parent / "fixtures" / "isochrones"
+    for filepath in fixture_dir.glob("*.dat"):
+        shutil.copy2(filepath, tmp_path / filepath.name)
+    return tmp_path
+
+
+def test_isochrone_panel_disabled_when_empty(monkeypatch, tk_root, tmp_path) -> None:
+    monkeypatch.setattr("gui.app.ISOCHRONES_DIR", tmp_path)
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    if app._isochrones_thread is not None:
+        app._isochrones_thread.join(timeout=1)
+        app.root.update()
+    assert str(app.isochrone_panel.combo.cget("state")) == "disabled"
+    assert app.isochrone_panel.available_isochrones == []
+
+
+def test_isochrone_dropdown_populates_and_overlays(monkeypatch, tk_root, tmp_path, sample_processed_df) -> None:
+    isochrone_dir = _copy_isochrones_fixture_dir(tmp_path)
+    monkeypatch.setattr("gui.app.ISOCHRONES_DIR", isochrone_dir)
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    if app._isochrones_thread is not None:
+        app._isochrones_thread.join(timeout=1)
+    for _ in range(20):
+        app.root.update()
+        if app.isochrone_panel.combo["values"]:
+            break
+    values = app.isochrone_panel.combo["values"]
+    assert len(values) >= 1
+
+    app.df_raw = sample_processed_df[["source_id", "ra", "dec", "parallax", "phot_g_mean_mag", "bp_rp"]].copy()
+    app._process_data()
+
+    selection = app.isochrone_panel.get_selected_isochrone()
+    assert selection is not None
+    app._overlay_selected_isochrone(selection)
+    assert len(app.active_isochrones) == 1
+
+    app._clear_isochrones()
+    assert len(app.active_isochrones) == 0

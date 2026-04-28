@@ -1,8 +1,8 @@
 """Descarga de una muestra estelar desde Gaia DR3 usando ADQL.
 
-La consulta combina gaiadr3.gaia_source con gaiadr3.astrophysical_parameters
-para recuperar magnitudes, paralaje y parametros estelares derivados como
-teff_gspphot, lum_flame y radius_flame.
+La consulta combina `gaiadr3.gaia_source` con tablas auxiliares de Gaia para
+recuperar magnitudes, paralaje, parametros estelares derivados y columnas de
+variabilidad cuando estan disponibles.
 """
 
 from __future__ import annotations
@@ -95,14 +95,31 @@ def _build_query(n_stars: int, max_dist_pc: float) -> str:
         ap.lum_flame,
         ap.radius_flame,
         gs.ruwe,
-        gs.phot_bp_rp_excess_factor
-        , d.r_med_geo, d.r_lo_geo, d.r_hi_geo,
-        d.r_med_photogeo, d.r_lo_photogeo, d.r_hi_photogeo
+        gs.phot_bp_rp_excess_factor,
+        d.r_med_geo,
+        d.r_lo_geo,
+        d.r_hi_geo,
+        d.r_med_photogeo,
+        d.r_lo_photogeo,
+        d.r_hi_photogeo,
+        vs.in_vari_classification_result,
+        vcr.best_class_name,
+        vcr.best_class_score,
+        vc.pf AS cepheid_period,
+        vr.pf AS rrlyrae_period
     FROM gaiadr3.gaia_source AS gs
     LEFT JOIN gaiadr3.astrophysical_parameters AS ap
         ON gs.source_id = ap.source_id
     LEFT JOIN external.gaiaedr3_distance AS d
         ON gs.source_id = d.source_id
+    LEFT JOIN gaiadr3.vari_summary AS vs
+        ON gs.source_id = vs.source_id
+    LEFT JOIN gaiadr3.vari_classifier_result AS vcr
+        ON gs.source_id = vcr.source_id
+    LEFT JOIN gaiadr3.vari_cepheid AS vc
+        ON gs.source_id = vc.source_id
+    LEFT JOIN gaiadr3.vari_rrlyrae AS vr
+        ON gs.source_id = vr.source_id
     WHERE gs.parallax > {min_parallax}
         AND gs.parallax_error / gs.parallax < 0.1
         AND gs.ruwe < 1.4

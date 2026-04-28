@@ -18,8 +18,9 @@ from data.download import query_gaia_sample
 from src.extinction import apply_extinction_correction, prime_bayestar_cache
 from src.distances import best_distance_bayesian, absolute_magnitude_bayesian
 from gui.plots import MatplotlibPanel
-from gui.widgets import DataTable, StatisticsPanel, StatusBar
+from gui.widgets import DataTable, IsochronePanel, StatisticsPanel, StatusBar, VariablesPanel
 from src.hr_diagram import plot_hr
+from src.isochrones import fit_best_age, list_available_isochrones, load_isochrone
 from src.statistics import compute_statistics
 from src.temperature import (
     absolute_magnitude,
@@ -28,6 +29,10 @@ from src.temperature import (
     spectral_type,
     teff_from_bv,
 )
+from src.variables import add_variability_columns
+
+
+ISOCHRONES_DIR = Path(__file__).resolve().parent.parent / "data" / "isochrones"
 
 
 class StellarClassifierApp:
@@ -49,9 +54,15 @@ class StellarClassifierApp:
 
         self._download_thread: threading.Thread | None = None
         self._bayestar_preload_thread: threading.Thread | None = None
+        self._isochrones_thread: threading.Thread | None = None
         self._bayestar_ready = not preload_bayestar
         self._bayestar_error: str | None = None
+        self._isochrones_error: str | None = None
         self._preload_bayestar = preload_bayestar
+
+        self.available_isochrones: list[dict] = []
+        self.active_isochrones: list[dict] = []
+        self._isochrone_colors = ["tab:red", "tab:blue", "tab:green", "tab:orange", "tab:purple"]
 
         self.n_stars_var = tk.IntVar(value=5000)
         self.max_dist_var = tk.IntVar(value=100)
@@ -62,6 +73,7 @@ class StellarClassifierApp:
 
         if self._preload_bayestar:
             self._start_bayestar_preload()
+        self._start_isochrones_load()
 
     def _build_layout(self) -> None:
         """Construye la disposicion general de la interfaz."""
@@ -91,9 +103,23 @@ class StellarClassifierApp:
         right_frame.grid(row=0, column=1, sticky="nsew")
         right_frame.columnconfigure(0, weight=1)
         right_frame.rowconfigure(0, weight=1)
+        right_frame.rowconfigure(1, weight=0)
 
         self.stats_panel = StatisticsPanel(right_frame)
         self.stats_panel.grid(row=0, column=0, sticky="nsew")
+
+        self.isochrone_panel = IsochronePanel(
+            right_frame,
+            on_overlay=self._overlay_selected_isochrone,
+            on_clear=self._clear_isochrones,
+            on_fit_age=self._fit_best_age,
+        )
+        self.isochrone_panel.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.isochrone_panel.set_loading()
+
+        self.variables_panel = VariablesPanel(right_frame, on_validate=self._validate_pl)
+        self.variables_panel.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self.variables_panel.set_status("Panel de variables: esperando descarga")
 
         table_frame = ttk.LabelFrame(self.root, text="Tabla de datos")
         table_frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=6)
@@ -149,6 +175,7 @@ class StellarClassifierApp:
             variable=self.bayesian_var,
         )
         self.bayesian_check.grid(row=0, column=5, padx=(0, 12))
+        self.bayesian_check.configure(state="disabled")
 
         ttk.Label(action_bar, text="N:").grid(row=0, column=6, padx=(0, 4))
         self.n_stars_entry = ttk.Entry(action_bar, textvariable=self.n_stars_var, width=8)
@@ -184,6 +211,193 @@ class StellarClassifierApp:
         )
         self._bayestar_preload_thread.start()
         self.root.after(0, self._poll_bayestar_preload_thread)
+
+    def _start_isochrones_load(self) -> None:
+        """Inicia la carga en segundo plano de la lista de isócronas."""
+        if self._isochrones_thread and self._isochrones_thread.is_alive():
+            return
+
+        self._isochrones_error = None
+        self.isochrone_panel.set_loading()
+        self._isochrones_thread = threading.Thread(target=self._isochrones_loader_worker, daemon=True)
+        self._isochrones_thread.start()
+        self.root.after(0, self._poll_isochrones_thread)
+
+    def _isochrones_loader_worker(self) -> None:
+        """Carga la lista de isócronas fuera del hilo principal."""
+        try:
+            self.available_isochrones = list_available_isochrones(str(ISOCHRONES_DIR))
+        except Exception as exc:
+            self._isochrones_error = str(exc)
+
+    def _poll_isochrones_thread(self) -> None:
+        """Comprueba si terminó la carga de isócronas y actualiza la GUI."""
+        if not self._isochrones_thread:
+            return
+
+        if self._isochrones_thread.is_alive():
+            self.root.after(100, self._poll_isochrones_thread)
+            return
+
+        if self._isochrones_error is None:
+            self._on_isochrones_loaded()
+        else:
+            self._on_isochrones_load_error(self._isochrones_error)
+
+    def _on_isochrones_loaded(self) -> None:
+        """Puebla el panel de isócronas cuando la carga termina bien."""
+        if not self.available_isochrones:
+            self.isochrone_panel.set_isochrones([])
+            self.isochrone_panel.set_status("No hay isócronas en data/isochrones/")
+            return
+
+        self.isochrone_panel.set_isochrones(self.available_isochrones)
+        self.isochrone_panel.set_status(f"{len(self.available_isochrones)} isócronas listas")
+
+    def _on_isochrones_load_error(self, message: str) -> None:
+        """Notifica un fallo leyendo isócronas sin romper la GUI."""
+        self.available_isochrones = []
+        self.isochrone_panel.set_isochrones([])
+        self.isochrone_panel.set_status(f"Error al leer isócronas: {message}")
+
+    def _refresh_hr_plot(self) -> None:
+        """Redibuja el HR si ya hay datos procesados."""
+        if self.df_processed is not None and not self.df_processed.empty:
+            self._plot_data()
+
+    def _overlay_selected_isochrone(self, selection: dict) -> None:
+        """Carga la isócrona seleccionada y la añade a la superposición activa."""
+        if not selection:
+            return
+
+        try:
+            loaded = load_isochrone(
+                selection["log_age"],
+                metallicity=selection.get("metallicity", 0.0),
+                isochrones_dir=str(ISOCHRONES_DIR),
+            )
+        except Exception as exc:
+            messagebox.showerror("Error de isócrona", str(exc))
+            return
+
+        label = selection.get("label_humano", f"log_age={selection.get('log_age', '?')}")
+        if any(item.get("label") == label for item in self.active_isochrones):
+            self.isochrone_panel.set_status(f"Ya está sobrepuesta: {label}")
+            self._refresh_hr_plot()
+            return
+
+        color = self._isochrone_colors[len(self.active_isochrones) % len(self._isochrone_colors)]
+        self.active_isochrones.append(
+            {
+                "isochrone": loaded,
+                "log_age": selection["log_age"],
+                "color": color,
+                "label": label,
+            }
+        )
+        self.isochrone_panel.set_status(f"Isócrona añadida: {label}")
+        self._refresh_hr_plot()
+
+    def _clear_isochrones(self) -> None:
+        """Limpia todas las isócronas activas y refresca el HR."""
+        self.active_isochrones.clear()
+        self.isochrone_panel.set_status("Isócronas limpiadas")
+        self._refresh_hr_plot()
+
+    def _fit_best_age(self) -> None:
+        """Ajusta la mejor edad en segundo plano y sobrepone la isócrona ganadora."""
+        if self.df_processed is None or self.df_processed.empty:
+            self._set_status("error: primero procesa datos")
+            return
+
+        if self._isochrones_thread and self._isochrones_thread.is_alive():
+            self._set_status("espera a que termine la carga de isócronas")
+            return
+
+        self.isochrone_panel.set_status("Ajustando edad en segundo plano...")
+
+        def worker() -> None:
+            try:
+                result = fit_best_age(
+                    self.df_processed,
+                    age_grid=np.arange(7.0, 10.1, 0.1),
+                    metallicity=0.0,
+                    use_corrected=self.extinction_var.get(),
+                    use_bayesian=self.bayesian_var.get(),
+                    isochrones_dir=str(ISOCHRONES_DIR),
+                )
+                self.root.after(0, lambda: self._on_fit_best_age_success(result))
+            except Exception as exc:
+                self.root.after(0, lambda: self._on_fit_best_age_error(str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_fit_best_age_success(self, result: dict) -> None:
+        """Muestra el resultado del ajuste y sobrepone la mejor isócrona."""
+        best_log_age = float(result["best_log_age"])
+        best_label = str(result["best_age_label"])
+        chi2 = float(result["min_chi2"])
+        best_isochrone = result.get("best_isochrone")
+
+        if isinstance(best_isochrone, pd.DataFrame) and not best_isochrone.empty:
+            color = self._isochrone_colors[len(self.active_isochrones) % len(self._isochrone_colors)]
+            label = f"Ajuste {best_label}"
+            self.active_isochrones.append(
+                {
+                    "isochrone": best_isochrone,
+                    "log_age": best_log_age,
+                    "color": color,
+                    "label": label,
+                }
+            )
+            self._refresh_hr_plot()
+
+        self.isochrone_panel.set_status(f"Edad mejor: {best_label} (chi2={chi2:.3f})")
+        messagebox.showinfo(
+            "Ajuste de edad",
+            f"Edad mejor: {best_label}\nlog_age={best_log_age:.2f}\nchi2={chi2:.3f}",
+        )
+
+    def _on_fit_best_age_error(self, message: str) -> None:
+        """Muestra un error si el ajuste de edad falla."""
+        self.isochrone_panel.set_status(f"Error en ajuste: {message}")
+        messagebox.showerror("Error de ajuste", message)
+
+    def _validate_pl(self) -> None:
+        """Valida relaciones P-L en background y muestra un resumen simple."""
+        if self.df_processed is None or self.df_processed.empty:
+            self._set_status("error: primero procesa datos")
+            return
+
+        self.variables_panel.set_status("Validando P-L en segundo plano...")
+
+        def worker() -> None:
+            df = self.df_processed
+            # Preferir distance_pc_bayesian cuando esté activada
+            dist_col = (
+                "distance_pc_bayesian" if self.bayesian_var.get() and "distance_pc_bayesian" in df.columns else "distance_pc"
+            )
+            if "distance_pc_PL" not in df.columns:
+                self.root.after(0, lambda: messagebox.showinfo("Validación P-L", "No hay distancias P-L calculadas para esta muestra."))
+                self.root.after(0, lambda: self.variables_panel.set_status("Sin distancias P-L en la muestra"))
+                return
+
+            mask = np.isfinite(df["distance_pc_PL"].to_numpy(dtype=float)) & np.isfinite(df[dist_col].to_numpy(dtype=float))
+            if not mask.any():
+                self.root.after(0, lambda: messagebox.showinfo("Validación P-L", "No hay objetos con ambas distancias (P-L y geom/bayes) finitas."))
+                self.root.after(0, lambda: self.variables_panel.set_status("Sin pares de distancias finitas"))
+                return
+
+            pl = df.loc[mask, "distance_pc_PL"].to_numpy(dtype=float)
+            ref = df.loc[mask, dist_col].to_numpy(dtype=float)
+            frac = np.abs(pl - ref) / np.maximum(ref, 1.0)
+            median_frac = float(np.median(frac))
+            n = int(mask.sum())
+            msg = f"Objetos comparados: {n}\nMediana diferencia fraccional: {median_frac:.3f}"
+            self.root.after(0, lambda: messagebox.showinfo("Validación P-L", msg))
+            self.root.after(0, lambda: self.variables_panel.set_status(f"Validación completa: {n} objetos"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _bayestar_preload_worker(self) -> None:
         """Carga Bayestar2019 fuera del hilo principal de Tkinter."""
@@ -263,7 +477,10 @@ class StellarClassifierApp:
             self.root.after(100, lambda: self._on_download_success(df))
         except Exception as exc:
             # Igual para la rama de error, que debe mostrar el dialogo desde Tk.
-            self.root.after(100, lambda: self._on_download_error(str(exc)))
+            # Bind the message into the lambda default to avoid referencing the
+            # exception variable after the except block (it gets cleared).
+            msg = str(exc)
+            self.root.after(100, lambda m=msg: self._on_download_error(m))
 
     def _on_download_success(self, df: pd.DataFrame) -> None:
         self.df_raw = df
@@ -289,6 +506,19 @@ class StellarClassifierApp:
             self.bayesian_check.configure(state="normal")
         else:
             self.bayesian_check.configure(state="disabled")
+        # Habilitar panel de variables si la descarga incluyo columnas de variabilidad
+        if {"best_class_name", "in_vari_classification_result"}.intersection(df.columns):
+            try:
+                self.variables_panel.set_status("Columnas de variabilidad detectadas")
+                self.variables_panel.set_enabled(True)
+            except Exception:
+                pass
+        else:
+            try:
+                self.variables_panel.set_status("No hay columnas de variabilidad en la descarga")
+                self.variables_panel.set_enabled(False)
+            except Exception:
+                pass
 
     def _on_download_error(self, message: str) -> None:
         self._set_status(f"error: {message}")
@@ -369,6 +599,13 @@ class StellarClassifierApp:
                 )
                 df = apply_extinction_correction(df, distance_col=dist_col)
 
+            # Enriquecemos el DataFrame con columnas de variabilidad si están presentes
+            try:
+                df = add_variability_columns(df)
+            except Exception:
+                # No bloquear por errores en columnas opcionales de variabilidad
+                pass
+
             self.df_processed = df
             self.stats = compute_statistics(df)
 
@@ -412,7 +649,13 @@ class StellarClassifierApp:
 
         self._set_status("graficando diagrama HR...")
         try:
-            plot_hr(self.df_processed, ax=self.ax, use_bayesian=self.bayesian_var.get())
+            plot_hr(
+                self.df_processed,
+                ax=self.ax,
+                use_corrected=self.extinction_var.get(),
+                use_bayesian=self.bayesian_var.get(),
+                isochrones_to_overlay=self.active_isochrones,
+            )
             self.plot_panel.draw()
             self._set_status("grafica lista")
         except Exception as exc:

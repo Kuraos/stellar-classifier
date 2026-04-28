@@ -13,7 +13,8 @@ incluyendo procesamiento fisico y una interfaz grafica interactiva en Tkinter.
 - Clasificacion espectral OBAFGKM.
 - Diagrama Hertzsprung-Russell embebido con herramientas de zoom/pan.
 - Tabla ordenable de resultados y exportacion a CSV.
- - Distancias bayesianas (Bailer-Jones et al. 2021) como alternativa a 1000/parallax.
+- Distancias bayesianas (Bailer-Jones et al. 2021) como alternativa a 1000/parallax.
+- Isócronas PARSEC (Bressan et al. 2012) para superponer modelos teóricos sobre el HR.
 
 ## Captura de la GUI
 
@@ -39,9 +40,23 @@ python main.py
 2. Click en **Procesar**.
 3. Si quieres corregir extincion, marca **Corregir extinción** antes de procesar.
 	- Si prefieres las distancias bayesianas usa el checkbox "Distancias bayesianas" (independiente de la corrección de extinción).
+   - Usa el panel **Isócronas PARSEC** para sobreponer modelos o ajustar una edad de referencia.
 4. Click en **Graficar**.
 5. (Opcional) Click en **Exportar CSV**.
 6. La primera vez que abras la GUI, Bayestar2019 se carga en segundo plano.
+
+## Datos externos requeridos
+
+Para usar isócronas PARSEC con archivos reales, descarga los ficheros desde
+Padova y colócalos en [data/isochrones/](data/isochrones/). El repositorio
+incluye ejemplos sintéticos mínimos para probar la carga y el trazado sin
+dependencias externas.
+
+## Mejoras científicas implementadas
+
+- Distancias bayesianas (Bailer-Jones et al. 2021)
+- Corrección de extinción (Bayestar2019)
+- Isócronas PARSEC (Bressan et al. 2012)
 
 ## Estructura principal
 

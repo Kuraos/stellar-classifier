@@ -89,7 +89,23 @@ def compute_statistics(df: pd.DataFrame) -> dict:
             "n_recovered_by_bayesian": recovered,
         }
 
-    return {
+    # Resumen de variabilidad (cuando las columnas existan)
+    variability_summary = None
+    if "variable_type" in df.columns:
+        types = (
+            df["variable_type"].astype(str).fillna("OTHER").to_list()
+        )
+        unique, counts = np.unique(types, return_counts=True)
+        counts_map = {k: int(v) for k, v in zip(unique.tolist(), counts.tolist())}
+        n_vars = int(sum(v for k, v in counts_map.items() if k != "OTHER"))
+        n_with_pl = int(np.sum(np.isfinite(df.get("distance_pc_PL", np.array([np.nan]))).astype(int)))
+        variability_summary = {
+            "counts_by_type": counts_map,
+            "n_variables": n_vars,
+            "n_with_pl_distance": n_with_pl,
+        }
+
+    result = {
         "n_stars": int(len(df)),
         "teff": teff_stats,
         "M_G": mg_stats,
@@ -98,3 +114,8 @@ def compute_statistics(df: pd.DataFrame) -> dict:
         "spectral_distribution": spectral_distribution,
         "distance_comparison": distance_comparison,
     }
+
+    if variability_summary is not None:
+        result["variability"] = variability_summary
+
+    return result
