@@ -13,6 +13,7 @@ incluyendo procesamiento fisico y una interfaz grafica interactiva en Tkinter.
 - Clasificacion espectral OBAFGKM.
 - Diagrama Hertzsprung-Russell embebido con herramientas de zoom/pan.
 - Tabla ordenable de resultados y exportacion a CSV.
+ - Distancias bayesianas (Bailer-Jones et al. 2021) como alternativa a 1000/parallax.
 
 ## Captura de la GUI
 
@@ -37,6 +38,7 @@ python main.py
 1. Click en **Descargar datos**.
 2. Click en **Procesar**.
 3. Si quieres corregir extincion, marca **Corregir extinción** antes de procesar.
+	- Si prefieres las distancias bayesianas usa el checkbox "Distancias bayesianas" (independiente de la corrección de extinción).
 4. Click en **Graficar**.
 5. (Opcional) Click en **Exportar CSV**.
 6. La primera vez que abras la GUI, Bayestar2019 se carga en segundo plano.

@@ -31,6 +31,12 @@ REQUIRED_COLUMNS = [
     "teff_gspphot",
     "lum_flame",
     "radius_flame",
+    "r_med_geo",
+    "r_lo_geo",
+    "r_hi_geo",
+    "r_med_photogeo",
+    "r_lo_photogeo",
+    "r_hi_photogeo",
 ]
 
 
@@ -90,9 +96,13 @@ def _build_query(n_stars: int, max_dist_pc: float) -> str:
         ap.radius_flame,
         gs.ruwe,
         gs.phot_bp_rp_excess_factor
+        , d.r_med_geo, d.r_lo_geo, d.r_hi_geo,
+        d.r_med_photogeo, d.r_lo_photogeo, d.r_hi_photogeo
     FROM gaiadr3.gaia_source AS gs
     LEFT JOIN gaiadr3.astrophysical_parameters AS ap
         ON gs.source_id = ap.source_id
+    LEFT JOIN external.gaiaedr3_distance AS d
+        ON gs.source_id = d.source_id
     WHERE gs.parallax > {min_parallax}
         AND gs.parallax_error / gs.parallax < 0.1
         AND gs.ruwe < 1.4

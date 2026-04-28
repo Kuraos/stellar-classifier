@@ -51,6 +51,12 @@ def test_query_gaia_sample_writes_csv(monkeypatch, tmp_path) -> None:
             "radius_flame": [0.9, 0.85],
             "ruwe": [1.1, 1.2],
             "phot_bp_rp_excess_factor": [1.2, 1.3],
+            "r_med_geo": [100.0, 120.0],
+            "r_lo_geo": [90.0, 110.0],
+            "r_hi_geo": [110.0, 130.0],
+            "r_med_photogeo": [98.0, 118.0],
+            "r_lo_photogeo": [88.0, 108.0],
+            "r_hi_photogeo": [108.0, 128.0],
         }
     )
 
@@ -74,6 +80,7 @@ def test_query_gaia_sample_writes_csv(monkeypatch, tmp_path) -> None:
     assert captured["url"] == download.GAIA_TAP_SYNC_URL
     assert "ruwe < 1.4" in captured["data"]["QUERY"]
     assert "LEFT JOIN gaiadr3.astrophysical_parameters" in captured["data"]["QUERY"]
+    assert "LEFT JOIN external.gaiaedr3_distance" in captured["data"]["QUERY"]
     assert "ap.lum_flame" in captured["data"]["QUERY"]
     assert "ap.radius_flame" in captured["data"]["QUERY"]
     assert captured["timeout"] == download.GAIA_REQUEST_TIMEOUT_SECONDS
@@ -99,6 +106,12 @@ def test_query_gaia_sample_uses_sync_fallback(monkeypatch, tmp_path) -> None:
             "radius_flame": [0.9],
             "ruwe": [1.1],
             "phot_bp_rp_excess_factor": [1.2],
+            "r_med_geo": [100.0],
+            "r_lo_geo": [90.0],
+            "r_hi_geo": [110.0],
+            "r_med_photogeo": [98.0],
+            "r_lo_photogeo": [88.0],
+            "r_hi_photogeo": [108.0],
         }
     )
 

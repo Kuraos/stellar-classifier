@@ -12,6 +12,7 @@ def test_compute_statistics_has_expected_top_keys(sample_processed_df) -> None:
         "distance_pc",
         "luminosity_solar",
         "spectral_distribution",
+        "distance_comparison",
     }
     assert set(stats.keys()) == expected
 

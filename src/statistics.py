@@ -70,6 +70,25 @@ def compute_statistics(df: pd.DataFrame) -> dict:
     )
     spectral_distribution = {key: int(counts.get(key, 0)) for key in SPECTRAL_ORDER}
 
+    # Comparacion entre distancia simple (1000/parallax) y bayesiana si existe
+    distance_comparison = None
+    if "distance_pc_bayesian" in df.columns:
+        simple = df["distance_pc"].to_numpy(dtype=float)
+        bay = df["distance_pc_bayesian"].to_numpy(dtype=float)
+        # diferencia absoluta donde ambos son finitos
+        mask = np.isfinite(simple) & np.isfinite(bay)
+        diffs = np.abs(bay[mask] - simple[mask])
+        median_diff = float(np.nanmedian(diffs)) if diffs.size > 0 else 0.0
+        max_diff = float(np.nanmax(diffs)) if diffs.size > 0 else 0.0
+        n_negative_parallax = int(np.sum(df["parallax"].to_numpy(dtype=float) <= 0))
+        recovered = int(np.sum((df["parallax"].to_numpy(dtype=float) <= 0) & np.isfinite(bay)))
+        distance_comparison = {
+            "median_diff_pc": median_diff,
+            "max_diff_pc": max_diff,
+            "n_negative_parallax": n_negative_parallax,
+            "n_recovered_by_bayesian": recovered,
+        }
+
     return {
         "n_stars": int(len(df)),
         "teff": teff_stats,
@@ -77,4 +96,5 @@ def compute_statistics(df: pd.DataFrame) -> dict:
         "distance_pc": dist_stats,
         "luminosity_solar": lum_stats,
         "spectral_distribution": spectral_distribution,
+        "distance_comparison": distance_comparison,
     }

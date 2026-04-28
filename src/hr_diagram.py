@@ -14,7 +14,7 @@ import pandas as pd
 SPECTRAL_BOUNDS = [30000, 10000, 7500, 6000, 5200, 3700]
 
 
-def plot_hr(df: pd.DataFrame, ax: Optional[plt.Axes] = None) -> plt.Figure:
+def plot_hr(df: pd.DataFrame, ax: Optional[plt.Axes] = None, use_bayesian: bool = False) -> plt.Figure:
     """Dibuja un diagrama HR usando T_eff y M_G.
 
     Si se pasa ax, dibuja sobre ese eje para permitir embebido en Tkinter y
@@ -31,9 +31,12 @@ def plot_hr(df: pd.DataFrame, ax: Optional[plt.Axes] = None) -> plt.Figure:
         fig = ax.figure
         ax.clear()
 
+    # Seleccionar la columna de magnitud absoluta a usar
+    mg_col = "M_G_bayesian" if use_bayesian and "M_G_bayesian" in df.columns else "M_G"
+
     scatter = ax.scatter(
         df["teff"],
-        df["M_G"],
+        df[mg_col],
         c=df["teff"],
         cmap="RdYlBu_r",
         s=12,

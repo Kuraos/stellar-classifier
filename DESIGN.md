@@ -51,6 +51,39 @@ M_G    = m_G + 5 + 5·log₁₀(π / 1000)
 ```
 
 ### 2.4 Luminosidad solar
+ 
+### Distancias bayesianas (Bailer-Jones)
+
+Problema con la aproximación simple `d = 1000/π`:
+
+- No es una estimación estadísticamente consistente cuando la incertidumbre del paralaje es significativa.
+- No admite paralajes negativos y produce distribuciones asimétricas en distancia.
+- Introduce sesgos no triviales en magnitudes absolutas y luminosidades.
+
+Solución propuesta (Bailer-Jones et al. 2021):
+
+- Se publica un catálogo de distancias precomputadas (`external.gaiaedr3_distance`) que devuelve medianas y percentiles (16/84) de la posterior sobre la distancia bajo un prior espacial (exponencialmente decreciente con escala variable según dirección galáctica).
+- Dos variantes: `r_med_geo` (solo astrometría) y `r_med_photogeo` (astrometría + fotometría). Preferimos `r_med_photogeo` cuando está disponible por su mayor precisión para estrellas tipo FGK.
+
+Estrategia de fallback implementada en `best_distance_bayesian`:
+
+1. Usar `r_med_photogeo` si no es NaN.
+2. Si `r_med_photogeo` es NaN, usar `r_med_geo` si no es NaN.
+3. Si ambas están ausentes, y el paralaje es positivo, usar `1000/parallax` como último recurso.
+
+Incertidumbres asimétricas:
+
+- Se exponen `distance_lo_bayesian` y `distance_hi_bayesian` (derivadas de `r_lo_*` y `r_hi_*`) para permitir barras de error asimétricas en gráficas.
+
+Combinación con la corrección de extinción (matriz 2x2):
+
+- Extinción OFF, Bayesiana OFF → flujo clásico: `distance_pc = 1000/parallax`, `M_G` calculado sobre ello.
+- Extinción ON,  Bayesiana OFF → aplicar extinción usando `distance_pc` y recalcular columnas `_corr` (comportamiento previo).
+- Extinción OFF, Bayesiana ON  → usar `distance_pc_bayesian` y `M_G_bayesian` para visualización/estadísticas.
+- Extinción ON,  Bayesiana ON  → aplicar corrección de extinción usando `distance_pc_bayesian` (parámetro `distance_col` en `apply_extinction_correction`) y recalcular `M_G_corr` a partir de la distancia bayesiana.
+
+Nota: Las columnas originales (`distance_pc`, `M_G`, `luminosity_solar`, etc.) se mantienen; las versiones bayesianas se agregan como columnas adicionales con sufijos `_bayesian`.
+
 
 ```
 L / L_sun = 10^((M_sun − M_G) / 2.5),   M_sun = 4.74

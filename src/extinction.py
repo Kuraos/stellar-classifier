@@ -55,15 +55,22 @@ def _as_array(values: ArrayLike) -> np.ndarray:
     return np.atleast_1d(np.asarray(values, dtype=float))
 
 
-def _build_galactic_coordinates(df: pd.DataFrame) -> SkyCoord:
-    """Construye coordenadas galacticas con distancia a partir de Gaia."""
+def _build_galactic_coordinates(df: pd.DataFrame, distance_col: str = "distance_pc") -> SkyCoord:
+    """Construye coordenadas galacticas usando la columna de distancia indicada.
+
+    Si `distance_col` no existe en el DataFrame, se intenta calcular `distance_pc`
+    como `1000/parallax` para mantener compatibilidad hacia atras.
+    """
     ra = df["ra"].to_numpy(dtype=float)
     dec = df["dec"].to_numpy(dtype=float)
-    parallax = df["parallax"].to_numpy(dtype=float)
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        distance_pc = 1000.0 / parallax
-    distance_pc[parallax <= 0] = np.nan
+    if distance_col in df.columns:
+        distance_pc = df[distance_col].to_numpy(dtype=float)
+    else:
+        parallax = df["parallax"].to_numpy(dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            distance_pc = 1000.0 / parallax
+        distance_pc[parallax <= 0] = np.nan
 
     return SkyCoord(
         ra=ra * u.deg,
@@ -110,6 +117,7 @@ def _broadcast_to_length(values: ArrayLike, length: int) -> np.ndarray:
 def apply_extinction_correction(
     df: pd.DataFrame,
     reddening_query: Callable[[SkyCoord], ArrayLike] | None = None,
+    distance_col: str = "distance_pc",
 ) -> pd.DataFrame:
     """Aplica correccion de extincion interestelar a una muestra Gaia.
 
@@ -131,14 +139,15 @@ def apply_extinction_correction(
         raise KeyError(f"Faltan columnas requeridas para corregir extincion: {sorted(missing)}")
 
     output = df.copy()
-    if "distance_pc" not in output.columns:
+    if distance_col not in output.columns:
+        # Mantener compatibilidad: rellenar distance_col con 1000/parallax si es necesario
         with np.errstate(divide="ignore", invalid="ignore"):
             parallax = output["parallax"].to_numpy(dtype=float)
-            distance_pc = 1000.0 / parallax
-        distance_pc[parallax <= 0] = np.nan
-        output["distance_pc"] = distance_pc
+            fallback = 1000.0 / parallax
+        fallback[parallax <= 0] = np.nan
+        output[distance_col] = fallback
 
-    coords = _build_galactic_coordinates(output)
+    coords = _build_galactic_coordinates(output, distance_col=distance_col)
     query = reddening_query or _query_bayestar_reddening
     reddening_ebv = _broadcast_to_length(query(coords), len(output))
 
@@ -153,6 +162,7 @@ def apply_extinction_correction(
     if "M_G" in output.columns:
         m_g_raw = output["M_G"].to_numpy(dtype=float)
     else:
+        # Si no hay M_G, construir desde la magnitud aparente y la distancia geometrica
         m_g_raw = absolute_magnitude(
             output["phot_g_mean_mag"].to_numpy(dtype=float),
             output["parallax"].to_numpy(dtype=float),

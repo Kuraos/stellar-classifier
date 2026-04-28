@@ -53,7 +53,7 @@ def test_app_process_with_extinction(monkeypatch, tk_root, sample_processed_df) 
     ].copy()
     app.extinction_var.set(True)
 
-    def fake_apply_extinction_correction(df, reddening_query=None):
+    def fake_apply_extinction_correction(df, reddening_query=None, distance_col="distance_pc"):
         corrected = df.copy()
         corrected["A_V"] = 0.05
         corrected["A_G"] = 0.05 * 0.789
@@ -99,3 +99,57 @@ def test_app_preloads_bayestar_in_background(monkeypatch, tk_root) -> None:
     assert calls["count"] == 1
     assert app._bayestar_ready is True
     assert "Bayestar2019 listo" in app.status_bar.status_var.get()
+
+
+def test_bayesian_checkbox_disabled_when_no_bailer_columns(tk_root, sample_processed_df) -> None:
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    # Simular descarga sin columnas Bailer-Jones
+    df = sample_processed_df[ ["source_id", "ra", "dec", "parallax", "phot_g_mean_mag", "bp_rp"] ].copy()
+    app._on_download_success(df)
+    assert str(app.bayesian_check.cget("state")) == "disabled"
+
+
+def test_bayesian_toggle_enables_and_changes_table(tk_root, sample_processed_df) -> None:
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    # Añadir columnas Bailer-Jones plausibles
+    df = sample_processed_df.copy()
+    # usar la distancia geometrica como photogeo para test simple
+    df["r_med_photogeo"] = df["distance_pc"].to_numpy()
+    df["r_lo_photogeo"] = df["distance_pc"].to_numpy() * 0.95
+    df["r_hi_photogeo"] = df["distance_pc"].to_numpy() * 1.05
+    app._on_download_success(df)
+    # ahora el checkbox debe estar habilitado
+    assert str(app.bayesian_check.cget("state")) == "normal"
+    # activar bayesiana y procesar
+    app.bayesian_var.set(True)
+    app.df_raw = df
+    app._process_data()
+    assert "distance_pc_bayesian" in app.df_processed.columns
+    # cuando bayesiana ON, distance_display debe coincidir con la bayesiana
+    assert np.allclose(app.df_processed["distance_display"].to_numpy(dtype=float), app.df_processed["distance_pc_bayesian"].to_numpy(dtype=float), equal_nan=True)
+
+
+def test_bayesian_plus_extinction_no_errors(monkeypatch, tk_root, sample_processed_df) -> None:
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    df = sample_processed_df.copy()
+    df["r_med_photogeo"] = df["distance_pc"].to_numpy()
+    df["r_lo_photogeo"] = df["distance_pc"].to_numpy() * 0.95
+    df["r_hi_photogeo"] = df["distance_pc"].to_numpy() * 1.05
+
+    app._on_download_success(df)
+    app.bayesian_var.set(True)
+    app.extinction_var.set(True)
+
+    # parcheamos la funcion de correccion para evitar depender de dustmaps en CI
+    def fake_apply_extinction_correction(df_in, reddening_query=None, distance_col="distance_pc"):
+        out = df_in.copy()
+        out["A_V"] = 0.01
+        # Simular que la funcion respeta distance_col (no alteraremos columnas aquí)
+        return out
+
+    monkeypatch.setattr("gui.app.apply_extinction_correction", fake_apply_extinction_correction)
+
+    app.df_raw = df
+    # No debe lanzar excepcion
+    app._process_data()
+    assert app.df_processed is not None

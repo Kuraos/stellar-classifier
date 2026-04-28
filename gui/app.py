@@ -16,6 +16,7 @@ import pandas as pd
 
 from data.download import query_gaia_sample
 from src.extinction import apply_extinction_correction, prime_bayestar_cache
+from src.distances import best_distance_bayesian, absolute_magnitude_bayesian
 from gui.plots import MatplotlibPanel
 from gui.widgets import DataTable, StatisticsPanel, StatusBar
 from src.hr_diagram import plot_hr
@@ -55,6 +56,7 @@ class StellarClassifierApp:
         self.n_stars_var = tk.IntVar(value=5000)
         self.max_dist_var = tk.IntVar(value=100)
         self.extinction_var = tk.BooleanVar(value=False)
+        self.bayesian_var = tk.BooleanVar(value=False)
 
         self._build_layout()
 
@@ -102,6 +104,7 @@ class StellarClassifierApp:
             ("source_id", "source_id", 160),
             ("ra", "ra", 90),
             ("dec", "dec", 90),
+            ("distance_display", "Distancia [pc]", 100),
             ("bp_rp", "BP-RP", 80),
             ("B_V", "B-V", 80),
             ("teff", "T_eff [K]", 100),
@@ -140,13 +143,20 @@ class StellarClassifierApp:
         )
         self.extinction_check.grid(row=0, column=4, padx=(0, 12))
 
-        ttk.Label(action_bar, text="N:").grid(row=0, column=5, padx=(0, 4))
-        self.n_stars_entry = ttk.Entry(action_bar, textvariable=self.n_stars_var, width=8)
-        self.n_stars_entry.grid(row=0, column=6, padx=(0, 8))
+        self.bayesian_check = ttk.Checkbutton(
+            action_bar,
+            text="Distancias bayesianas",
+            variable=self.bayesian_var,
+        )
+        self.bayesian_check.grid(row=0, column=5, padx=(0, 12))
 
-        ttk.Label(action_bar, text="Max pc:").grid(row=0, column=7, padx=(0, 4))
+        ttk.Label(action_bar, text="N:").grid(row=0, column=6, padx=(0, 4))
+        self.n_stars_entry = ttk.Entry(action_bar, textvariable=self.n_stars_var, width=8)
+        self.n_stars_entry.grid(row=0, column=7, padx=(0, 8))
+
+        ttk.Label(action_bar, text="Max pc:").grid(row=0, column=8, padx=(0, 4))
         self.max_dist_entry = ttk.Entry(action_bar, textvariable=self.max_dist_var, width=8)
-        self.max_dist_entry.grid(row=0, column=8)
+        self.max_dist_entry.grid(row=0, column=9)
 
     def _set_status(self, text: str) -> None:
         """Actualiza la barra inferior con un mensaje de estado."""
@@ -264,6 +274,7 @@ class StellarClassifierApp:
             "source_id",
             "ra",
             "dec",
+            "distance_display",
             "bp_rp",
             "B_V",
             "teff",
@@ -273,6 +284,11 @@ class StellarClassifierApp:
         ]))
         self.plot_panel.clear(message="Datos descargados. Presiona 'Procesar' y luego 'Graficar'.")
         self._set_status(f"descarga completada: {len(df)} filas")
+        # Habilitar o deshabilitar el checkbox bayesiano según existan las columnas Bailer-Jones
+        if {"r_med_photogeo", "r_med_geo"}.intersection(df.columns):
+            self.bayesian_check.configure(state="normal")
+        else:
+            self.bayesian_check.configure(state="disabled")
 
     def _on_download_error(self, message: str) -> None:
         self._set_status(f"error: {message}")
@@ -309,6 +325,30 @@ class StellarClassifierApp:
             df["luminosity_solar"] = luminosity_solar(df["M_G"].to_numpy(dtype=float))
             df["spectral_type"] = spectral_type(df["teff"].to_numpy(dtype=float))
 
+            # Construir columnas bayesianas si las columnas de Bailer-Jones existen
+            if {"r_med_photogeo", "r_med_geo"}.intersection(df.columns):
+                try:
+                    r_med_photogeo = df.get("r_med_photogeo", np.full_like(distance_pc, np.nan, dtype=float))
+                    r_med_geo = df.get("r_med_geo", np.full_like(distance_pc, np.nan, dtype=float))
+                    df["distance_pc_bayesian"] = best_distance_bayesian(r_med_photogeo, r_med_geo, parallax)
+
+                    # incertidumbres asimetricas: preferir photogeo, fallback geo
+                    r_lo_phot = df.get("r_lo_photogeo", np.full_like(distance_pc, np.nan, dtype=float))
+                    r_hi_phot = df.get("r_hi_photogeo", np.full_like(distance_pc, np.nan, dtype=float))
+                    r_lo_geo = df.get("r_lo_geo", np.full_like(distance_pc, np.nan, dtype=float))
+                    r_hi_geo = df.get("r_hi_geo", np.full_like(distance_pc, np.nan, dtype=float))
+                    lo = np.where(np.isfinite(r_lo_phot), r_lo_phot, r_lo_geo)
+                    hi = np.where(np.isfinite(r_hi_phot), r_hi_phot, r_hi_geo)
+                    df["distance_lo_bayesian"] = lo
+                    df["distance_hi_bayesian"] = hi
+
+                    # magnitud absoluta y luminosidad bayesiana
+                    df["M_G_bayesian"] = absolute_magnitude_bayesian(g_mag, df["distance_pc_bayesian"].to_numpy(dtype=float))
+                    df["luminosity_solar_bayesian"] = luminosity_solar(df["M_G_bayesian"].to_numpy(dtype=float))
+                except Exception:
+                    # No bloquear el flujo de procesamiento por errores en columnas opcionales
+                    pass
+
             if self.extinction_var.get():
                 if not self._bayestar_ready:
                     if self._bayestar_preload_thread and self._bayestar_preload_thread.is_alive():
@@ -321,7 +361,13 @@ class StellarClassifierApp:
                     else:
                         self._set_status("Bayestar2019 no está precargado todavía.")
                     return
-                df = apply_extinction_correction(df)
+                # Seleccionar columna de distancia para la correccion (bayesiana si esta activa)
+                dist_col = (
+                    "distance_pc_bayesian"
+                    if self.bayesian_var.get() and "distance_pc_bayesian" in df.columns
+                    else "distance_pc"
+                )
+                df = apply_extinction_correction(df, distance_col=dist_col)
 
             self.df_processed = df
             self.stats = compute_statistics(df)
@@ -329,10 +375,17 @@ class StellarClassifierApp:
             self.stats_panel.update_from_stats(self.stats)
 
             # La tabla muestra solo las columnas derivadas mas utiles para revision rapida.
+            # La columna de distancia mostrada depende del toggle bayesiano.
+            if self.bayesian_var.get() and "distance_pc_bayesian" in df.columns:
+                df["distance_display"] = df["distance_pc_bayesian"]
+            else:
+                df["distance_display"] = df["distance_pc"]
+
             table_cols = [
                 "source_id",
                 "ra",
                 "dec",
+                "distance_display",
                 "bp_rp",
                 "B_V",
                 "teff",
@@ -359,7 +412,7 @@ class StellarClassifierApp:
 
         self._set_status("graficando diagrama HR...")
         try:
-            plot_hr(self.df_processed, ax=self.ax)
+            plot_hr(self.df_processed, ax=self.ax, use_bayesian=self.bayesian_var.get())
             self.plot_panel.draw()
             self._set_status("grafica lista")
         except Exception as exc:
