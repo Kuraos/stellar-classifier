@@ -7,6 +7,8 @@ incluyendo procesamiento fisico y una interfaz grafica interactiva en Tkinter.
 
 - Descarga de datos de Gaia DR3 via ADQL con filtros de calidad.
 - Conversion de BP-RP a B-V y estimacion de T_eff con relaciones empiricas.
+- Correccion opcional de extincion interestelar con Bayestar19 via dustmaps.
+- Precarga Bayestar2019 en segundo plano al iniciar la GUI.
 - Calculo de magnitud absoluta, distancia y luminosidad solar.
 - Clasificacion espectral OBAFGKM.
 - Diagrama Hertzsprung-Russell embebido con herramientas de zoom/pan.
@@ -34,8 +36,10 @@ python main.py
 
 1. Click en **Descargar datos**.
 2. Click en **Procesar**.
-3. Click en **Graficar**.
-4. (Opcional) Click en **Exportar CSV**.
+3. Si quieres corregir extincion, marca **Corregir extinción** antes de procesar.
+4. Click en **Graficar**.
+5. (Opcional) Click en **Exportar CSV**.
+6. La primera vez que abras la GUI, Bayestar2019 se carga en segundo plano.
 
 ## Estructura principal
 
@@ -45,6 +49,7 @@ stellar-classifier/
 │   └── download.py
 ├── src/
 │   ├── temperature.py
+│   ├── extinction.py
 │   ├── statistics.py
 │   ├── hr_diagram.py
 │   └── line_fitting.py

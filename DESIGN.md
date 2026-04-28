@@ -87,6 +87,7 @@ stellar-classifier/
 ├── src/
 │   ├── __init__.py
 │   ├── temperature.py         ← conversiones físicas
+│   ├── extinction.py          ← corrección de extinción interestelar
 │   ├── hr_diagram.py          ← genera el diagrama HR
 │   ├── statistics.py          ← cálculos estadísticos para la GUI
 │   └── line_fitting.py        ← (opcional) ajuste de líneas espectrales
@@ -134,6 +135,26 @@ Funciones puras sin dependencias de estado. Todas reciben arrays de NumPy y reto
 | `spectral_type(teff)` | float o array | str o array de str |
 
 Cada función documentada con docstring incluyendo la referencia bibliográfica.
+
+### 4.2.1 `src/extinction.py`
+
+**Función principal:** `apply_extinction_correction(df, reddening_query=None) -> pd.DataFrame`
+
+Aplica corrección de extinción interestelar sobre una muestra ya descargada
+de Gaia. La función:
+
+- Construye coordenadas galacticas con distancia a partir de `ra`, `dec` y `parallax`.
+- Consulta Bayestar19 a traves de `dustmaps` para estimar `E(B-V)`.
+- Convierte esa señal a `A_V`, `A_G` y `E(BP-RP)` con las relaciones de
+   Casagrande et al. (2018).
+- Agrega las columnas `A_V`, `A_G`, `E_BR`, `BP_RP_corr`, `B_V_corr`,
+   `teff_corr`, `M_G_corr`, `luminosity_solar_corr` y `spectral_type_corr`.
+- Recalcula en el mismo DataFrame las columnas canonicas `B_V`, `teff`,
+   `M_G`, `luminosity_solar` y `spectral_type` para que la GUI reutilice el
+   flujo existente.
+
+La consulta real depende de la disponibilidad del paquete `dustmaps` y del
+mapa Bayestar19 local.
 
 ### 4.3 `src/statistics.py`
 
@@ -203,8 +224,13 @@ Retorna un diccionario con las métricas que la GUI va a mostrar en paneles:
 1. **Barra superior de acciones** (`ttk.Frame` con botones):
    - `Descargar datos` → llama a `query_gaia_sample()` en un hilo separado (sin congelar la GUI). Muestra progreso en la barra de estado.
    - `Procesar` → aplica las conversiones de `temperature.py` a la tabla cargada y calcula estadísticas.
+   - `Corregir extinción` → activa la corrección de Bayestar19 antes del cálculo de estadisticas y la grafica.
    - `Graficar` → llama a `plot_hr(df, ax=self.ax)` sobre el canvas embebido.
    - `Exportar CSV` → guarda el DataFrame procesado en `results/stars_processed.csv`.
+
+La GUI además precarga Bayestar2019 en un hilo de fondo al arrancar. Esto
+evita que la primera corrección de extinción tenga que leer el HDF5 grande en
+el mismo momento en que el usuario pulsa `Procesar`.
 
 2. **Panel izquierdo — Gráfica** (matplotlib embebido con `FigureCanvasTkAgg`):
    - Toolbar de matplotlib debajo (zoom, pan, guardar imagen).

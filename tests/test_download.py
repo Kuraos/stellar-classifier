@@ -1,69 +1,12 @@
 from __future__ import annotations
 
 import os
-import sys
-import types
 
 import pandas as pd
 import pytest
+import requests
 
 from data import download
-
-
-def _mock_gaia_modules(sample_df: pd.DataFrame):
-    class FakeResults:
-        def to_pandas(self):
-            return sample_df
-
-    class FakeJob:
-        def get_results(self):
-            return FakeResults()
-
-    class FakeGaia:
-        ROW_LIMIT = None
-        last_query = ""
-
-        @staticmethod
-        def launch_job_async(query: str, dump_to_file: bool = False):
-            FakeGaia.last_query = query
-            return FakeJob()
-
-    gaia_module = types.ModuleType("astroquery.gaia")
-    gaia_module.Gaia = FakeGaia
-
-    astroquery_module = types.ModuleType("astroquery")
-    astroquery_module.gaia = gaia_module
-
-    return astroquery_module, gaia_module, FakeGaia
-
-
-def _mock_gaia_modules_async_fails_sync_succeeds(sample_df: pd.DataFrame):
-    class FakeResults:
-        def to_pandas(self):
-            return sample_df
-
-    class FakeJob:
-        def get_results(self):
-            return FakeResults()
-
-    class FakeGaia:
-        ROW_LIMIT = None
-
-        @staticmethod
-        def launch_job_async(query: str, dump_to_file: bool = False):
-            raise RuntimeError("Error 500: null")
-
-        @staticmethod
-        def launch_job(query: str, dump_to_file: bool = False):
-            return FakeJob()
-
-    gaia_module = types.ModuleType("astroquery.gaia")
-    gaia_module.Gaia = FakeGaia
-
-    astroquery_module = types.ModuleType("astroquery")
-    astroquery_module.gaia = gaia_module
-
-    return astroquery_module, gaia_module
 
 
 def _is_transient_gaia_error(message: str) -> bool:
@@ -79,6 +22,16 @@ def _is_transient_gaia_error(message: str) -> bool:
         "temporarily unavailable",
     ]
     return any(token in lowered for token in transient_tokens)
+
+
+class _FakeResponse:
+    def __init__(self, text: str, status_code: int = 200):
+        self.text = text
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
 
 
 def test_query_gaia_sample_writes_csv(monkeypatch, tmp_path) -> None:
@@ -101,9 +54,15 @@ def test_query_gaia_sample_writes_csv(monkeypatch, tmp_path) -> None:
         }
     )
 
-    astroquery_module, gaia_module, fake_gaia = _mock_gaia_modules(sample_df)
-    monkeypatch.setitem(sys.modules, "astroquery", astroquery_module)
-    monkeypatch.setitem(sys.modules, "astroquery.gaia", gaia_module)
+    captured = {}
+
+    def fake_post(url, data=None, timeout=None):
+        captured["url"] = url
+        captured["data"] = data
+        captured["timeout"] = timeout
+        return _FakeResponse(sample_df.to_csv(index=False))
+
+    monkeypatch.setattr(download.requests, "post", fake_post)
 
     output_file = tmp_path / "gaia_sample.csv"
     monkeypatch.setattr(download, "DATA_OUTPUT", output_file)
@@ -112,10 +71,12 @@ def test_query_gaia_sample_writes_csv(monkeypatch, tmp_path) -> None:
 
     assert len(result) == 2
     assert output_file.exists()
-    assert "ruwe < 1.4" in fake_gaia.last_query
-    assert "LEFT JOIN gaiadr3.astrophysical_parameters" in fake_gaia.last_query
-    assert "ap.lum_flame" in fake_gaia.last_query
-    assert "ap.radius_flame" in fake_gaia.last_query
+    assert captured["url"] == download.GAIA_TAP_SYNC_URL
+    assert "ruwe < 1.4" in captured["data"]["QUERY"]
+    assert "LEFT JOIN gaiadr3.astrophysical_parameters" in captured["data"]["QUERY"]
+    assert "ap.lum_flame" in captured["data"]["QUERY"]
+    assert "ap.radius_flame" in captured["data"]["QUERY"]
+    assert captured["timeout"] == download.GAIA_REQUEST_TIMEOUT_SECONDS
 
     for col in download.REQUIRED_COLUMNS:
         assert col in result.columns
@@ -141,9 +102,15 @@ def test_query_gaia_sample_uses_sync_fallback(monkeypatch, tmp_path) -> None:
         }
     )
 
-    astroquery_module, gaia_module = _mock_gaia_modules_async_fails_sync_succeeds(sample_df)
-    monkeypatch.setitem(sys.modules, "astroquery", astroquery_module)
-    monkeypatch.setitem(sys.modules, "astroquery.gaia", gaia_module)
+    calls = {"count": 0}
+
+    def fake_post(url, data=None, timeout=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise requests.Timeout("Read timed out")
+        return _FakeResponse(sample_df.to_csv(index=False))
+
+    monkeypatch.setattr(download.requests, "post", fake_post)
 
     output_file = tmp_path / "gaia_sample.csv"
     monkeypatch.setattr(download, "DATA_OUTPUT", output_file)
@@ -152,6 +119,7 @@ def test_query_gaia_sample_uses_sync_fallback(monkeypatch, tmp_path) -> None:
 
     assert len(result) == 1
     assert output_file.exists()
+    assert calls["count"] == 2
 
 
 @pytest.mark.online

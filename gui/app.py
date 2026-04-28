@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from data.download import query_gaia_sample
+from src.extinction import apply_extinction_correction, prime_bayestar_cache
 from gui.plots import MatplotlibPanel
 from gui.widgets import DataTable, StatisticsPanel, StatusBar
 from src.hr_diagram import plot_hr
@@ -31,7 +32,7 @@ from src.temperature import (
 class StellarClassifierApp:
     """Ventana principal y coordinadora del flujo de trabajo interactivo."""
 
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, preload_bayestar: bool = True):
         """Construye la ventana, el estado interno y todos los widgets."""
         self.root = root
         self.root.title("stellar-classifier")
@@ -46,11 +47,19 @@ class StellarClassifierApp:
         self.ax = None
 
         self._download_thread: threading.Thread | None = None
+        self._bayestar_preload_thread: threading.Thread | None = None
+        self._bayestar_ready = not preload_bayestar
+        self._bayestar_error: str | None = None
+        self._preload_bayestar = preload_bayestar
 
         self.n_stars_var = tk.IntVar(value=5000)
         self.max_dist_var = tk.IntVar(value=100)
+        self.extinction_var = tk.BooleanVar(value=False)
 
         self._build_layout()
+
+        if self._preload_bayestar:
+            self._start_bayestar_preload()
 
     def _build_layout(self) -> None:
         """Construye la disposicion general de la interfaz."""
@@ -124,13 +133,20 @@ class StellarClassifierApp:
         self.export_btn = ttk.Button(action_bar, text="Exportar CSV", command=self._export_csv)
         self.export_btn.grid(row=0, column=3, padx=(0, 12))
 
-        ttk.Label(action_bar, text="N:").grid(row=0, column=4, padx=(0, 4))
-        self.n_stars_entry = ttk.Entry(action_bar, textvariable=self.n_stars_var, width=8)
-        self.n_stars_entry.grid(row=0, column=5, padx=(0, 8))
+        self.extinction_check = ttk.Checkbutton(
+            action_bar,
+            text="Corregir extinción",
+            variable=self.extinction_var,
+        )
+        self.extinction_check.grid(row=0, column=4, padx=(0, 12))
 
-        ttk.Label(action_bar, text="Max pc:").grid(row=0, column=6, padx=(0, 4))
+        ttk.Label(action_bar, text="N:").grid(row=0, column=5, padx=(0, 4))
+        self.n_stars_entry = ttk.Entry(action_bar, textvariable=self.n_stars_var, width=8)
+        self.n_stars_entry.grid(row=0, column=6, padx=(0, 8))
+
+        ttk.Label(action_bar, text="Max pc:").grid(row=0, column=7, padx=(0, 4))
         self.max_dist_entry = ttk.Entry(action_bar, textvariable=self.max_dist_var, width=8)
-        self.max_dist_entry.grid(row=0, column=7)
+        self.max_dist_entry.grid(row=0, column=8)
 
     def _set_status(self, text: str) -> None:
         """Actualiza la barra inferior con un mensaje de estado."""
@@ -142,6 +158,59 @@ class StellarClassifierApp:
         self.download_btn.configure(state=state)
         self.n_stars_entry.configure(state=state)
         self.max_dist_entry.configure(state=state)
+
+    def _start_bayestar_preload(self) -> None:
+        """Inicia la carga en segundo plano del mapa Bayestar2019."""
+        if self._bayestar_preload_thread and self._bayestar_preload_thread.is_alive():
+            return
+
+        self._bayestar_ready = False
+        self._bayestar_error = None
+        self._set_status("cargando mapa Bayestar2019 en segundo plano...")
+
+        self._bayestar_preload_thread = threading.Thread(
+            target=self._bayestar_preload_worker,
+            daemon=True,
+        )
+        self._bayestar_preload_thread.start()
+        self.root.after(0, self._poll_bayestar_preload_thread)
+
+    def _bayestar_preload_worker(self) -> None:
+        """Carga Bayestar2019 fuera del hilo principal de Tkinter."""
+        try:
+            prime_bayestar_cache()
+        except Exception as exc:
+            self._bayestar_error = str(exc)
+
+    def _poll_bayestar_preload_thread(self) -> None:
+        """Comprueba el estado de la precarga y actualiza la GUI cuando termina."""
+        if not self._bayestar_preload_thread:
+            return
+
+        if self._bayestar_preload_thread.is_alive():
+            self.root.after(100, self._poll_bayestar_preload_thread)
+            return
+
+        if self._bayestar_error is None:
+            self._on_bayestar_preload_success()
+        else:
+            self._on_bayestar_preload_error(self._bayestar_error)
+
+    def _on_bayestar_preload_success(self) -> None:
+        """Marca Bayestar como listo para correccion y actualiza el estado."""
+        self._bayestar_ready = True
+        self._bayestar_error = None
+        current_status = self.status_bar.status_var.get().lower()
+        if "bayestar" in current_status or "cargando" in current_status:
+            self._set_status("Bayestar2019 listo para corrección")
+
+    def _on_bayestar_preload_error(self, message: str) -> None:
+        """Registra el error de precarga sin bloquear el resto de la GUI."""
+        self._bayestar_ready = False
+        self._bayestar_error = message
+        current_status = self.status_bar.status_var.get().lower()
+        if "bayestar" in current_status or "cargando" in current_status:
+            self._set_status(f"advertencia: no se pudo precargar Bayestar2019: {message}")
 
     def _start_download(self) -> None:
         """Valida la entrada y lanza la descarga en un hilo secundario."""
@@ -215,7 +284,12 @@ class StellarClassifierApp:
             self._set_status("error: primero descarga datos")
             return
 
-        self._set_status("procesando datos...")
+        status_message = (
+            "procesando datos con correccion de extincion..."
+            if self.extinction_var.get()
+            else "procesando datos..."
+        )
+        self._set_status(status_message)
         try:
             df = self.df_raw.copy()
 
@@ -234,6 +308,20 @@ class StellarClassifierApp:
             df["M_G"] = absolute_magnitude(g_mag, parallax)
             df["luminosity_solar"] = luminosity_solar(df["M_G"].to_numpy(dtype=float))
             df["spectral_type"] = spectral_type(df["teff"].to_numpy(dtype=float))
+
+            if self.extinction_var.get():
+                if not self._bayestar_ready:
+                    if self._bayestar_preload_thread and self._bayestar_preload_thread.is_alive():
+                        self._set_status(
+                            "Bayestar2019 sigue cargando en segundo plano. "
+                            "Espera unos segundos y vuelve a procesar."
+                        )
+                    elif self._bayestar_error is not None:
+                        self._set_status(f"error: no se pudo precargar Bayestar2019: {self._bayestar_error}")
+                    else:
+                        self._set_status("Bayestar2019 no está precargado todavía.")
+                    return
+                df = apply_extinction_correction(df)
 
             self.df_processed = df
             self.stats = compute_statistics(df)
@@ -254,10 +342,11 @@ class StellarClassifierApp:
             ]
             shown, total = self.data_table.set_dataframe(df[table_cols], max_rows=500)
 
+            suffix = " con correccion de extincion" if self.extinction_var.get() else ""
             if total > shown:
-                self._set_status(f"procesado listo: mostrando {shown}/{total} filas")
+                self._set_status(f"procesado listo{suffix}: mostrando {shown}/{total} filas")
             else:
-                self._set_status(f"procesado listo: {total} filas")
+                self._set_status(f"procesado listo{suffix}: {total} filas")
         except Exception as exc:
             self._set_status(f"error: {exc}")
             messagebox.showerror("Error de procesamiento", str(exc))

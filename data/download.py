@@ -7,12 +7,17 @@ teff_gspphot, lum_flame y radius_flame.
 
 from __future__ import annotations
 
+from io import StringIO
 import time
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 DATA_OUTPUT = Path(__file__).resolve().parent / "gaia_sample.csv"
+GAIA_TAP_SYNC_URL = "https://gea.esac.esa.int/tap-server/tap/sync"
+GAIA_REQUEST_TIMEOUT_SECONDS = 300
+GAIA_MAX_RETRIES = 3
 REQUIRED_COLUMNS = [
     "source_id",
     "ra",
@@ -29,35 +34,34 @@ REQUIRED_COLUMNS = [
 ]
 
 
-def _query_once_with_fallback(Gaia, query: str) -> pd.DataFrame:
-    """Ejecuta una consulta Gaia primero en modo asincrono y luego sincronico.
+def _query_gaia_tap_csv(query: str, timeout_seconds: int = GAIA_REQUEST_TIMEOUT_SECONDS) -> pd.DataFrame:
+    """Consulta Gaia TAP en modo sincronico y parsea el CSV devuelto.
 
-    La API de astroquery suele preferir trabajos asincronos, pero Gaia puede
-    rechazar ese modo de forma transitoria. En ese caso intentamos el fallback
-    sincronico antes de propagar el error.
+    La llamada usa un timeout amplio porque Gaia puede tardar bastante en
+    procesar consultas con filtros y joins sobre DR3.
     """
-    async_error: Exception | None = None
+    payload = {
+        "REQUEST": "doQuery",
+        "LANG": "ADQL",
+        "FORMAT": "csv",
+        "QUERY": query,
+    }
 
     try:
-        print("[Gaia] Metodo asincrono...")
-        job = Gaia.launch_job_async(query, dump_to_file=False)
-        return job.get_results().to_pandas()
+        print(f"[Gaia] Enviando consulta TAP sincronica con timeout {timeout_seconds}s...")
+        response = requests.post(GAIA_TAP_SYNC_URL, data=payload, timeout=timeout_seconds)
+        response.raise_for_status()
     except Exception as exc:
-        async_error = exc
-        print(f"[Gaia] Fallo asincrono: {exc}")
+        raise RuntimeError(f"Fallo la descarga desde Gaia TAP: {exc}") from exc
 
-    if not hasattr(Gaia, "launch_job"):
-        raise RuntimeError(f"Fallo asincrono y no hay fallback sincronico: {async_error}")
+    text = response.text.strip()
+    if not text:
+        raise RuntimeError("La consulta de Gaia devolvio una respuesta vacia")
 
     try:
-        print("[Gaia] Intentando fallback sincronico...")
-        job = Gaia.launch_job(query, dump_to_file=False)
-        return job.get_results().to_pandas()
-    except Exception as sync_exc:
-        raise RuntimeError(
-            "Fallo consulta asincrona y sincronica "
-            f"(asincrona: {async_error}; sincronica: {sync_exc})"
-        ) from sync_exc
+        return pd.read_csv(StringIO(text))
+    except Exception as exc:
+        raise RuntimeError(f"No fue posible interpretar el CSV devuelto por Gaia: {exc}") from exc
 
 
 def _validate_required_columns(df: pd.DataFrame) -> None:
@@ -119,20 +123,16 @@ def query_gaia_sample(n_stars: int = 5000, max_dist_pc: float = 100) -> pd.DataF
     if max_dist_pc <= 0:
         raise ValueError("max_dist_pc debe ser mayor a 0")
 
-    from astroquery.gaia import Gaia
-
     query = _build_query(n_stars=n_stars, max_dist_pc=max_dist_pc)
     print(f"[Gaia] Preparando consulta para TOP {n_stars} y distancia <= {max_dist_pc} pc")
 
-    Gaia.ROW_LIMIT = -1
-    max_retries = 3
     last_error: Exception | None = None
 
     # Gaia puede devolver errores transitorios, asi que damos algunos reintentos cortos.
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, GAIA_MAX_RETRIES + 1):
         try:
-            print(f"[Gaia] Ejecutando consulta (intento {attempt}/{max_retries})...")
-            df = _query_once_with_fallback(Gaia, query)
+            print(f"[Gaia] Ejecutando consulta (intento {attempt}/{GAIA_MAX_RETRIES})...")
+            df = _query_gaia_tap_csv(query)
 
             if df.empty:
                 raise RuntimeError("La consulta devolvio 0 filas")
@@ -147,7 +147,7 @@ def query_gaia_sample(n_stars: int = 5000, max_dist_pc: float = 100) -> pd.DataF
         except Exception as exc:  # pragma: no cover - cobertura via test con mocks
             last_error = exc
             print(f"[Gaia] Error en intento {attempt}: {exc}")
-            if attempt < max_retries:
+            if attempt < GAIA_MAX_RETRIES:
                 wait_seconds = min(2 ** (attempt - 1), 8)
                 print(f"[Gaia] Reintentando en {wait_seconds} segundos...")
                 time.sleep(wait_seconds)
