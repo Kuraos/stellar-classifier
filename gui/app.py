@@ -18,7 +18,7 @@ from data.download import query_gaia_sample
 from src.extinction import apply_extinction_correction, prime_bayestar_cache
 from src.distances import best_distance_bayesian, absolute_magnitude_bayesian
 from gui.plots import MatplotlibPanel
-from gui.widgets import DataTable, IsochronePanel, StatisticsPanel, StatusBar, VariablesPanel
+from gui.widgets import DataTable, IsochronePanel, StatisticsPanel, StatusBar, VariablesPanel, DetailPanel
 from src.hr_diagram import plot_hr
 from src.isochrones import fit_best_age, list_available_isochrones, load_isochrone
 from src.statistics import compute_statistics
@@ -68,6 +68,7 @@ class StellarClassifierApp:
         self.max_dist_var = tk.IntVar(value=100)
         self.extinction_var = tk.BooleanVar(value=False)
         self.bayesian_var = tk.BooleanVar(value=False)
+        self.only_variables_var = tk.BooleanVar(value=False)
 
         self._build_layout()
 
@@ -98,6 +99,7 @@ class StellarClassifierApp:
         self.plot_panel.grid(row=0, column=0, sticky="nsew")
         self.fig = self.plot_panel.figure
         self.ax = self.plot_panel.ax
+        # point selection will be wired once detail panel exists
 
         right_frame = ttk.Frame(content_frame)
         right_frame.grid(row=0, column=1, sticky="nsew")
@@ -120,6 +122,12 @@ class StellarClassifierApp:
         self.variables_panel = VariablesPanel(right_frame, on_validate=self._validate_pl)
         self.variables_panel.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         self.variables_panel.set_status("Panel de variables: esperando descarga")
+
+        # Panel lateral de detalle para la estrella seleccionada
+        self.detail_panel = DetailPanel(right_frame)
+        self.detail_panel.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        # Wire the plot selection callback to update the detail panel
+        self.plot_panel.on_point_selected = lambda info: self._on_point_selected(info)
 
         table_frame = ttk.LabelFrame(self.root, text="Tabla de datos")
         table_frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=6)
@@ -177,13 +185,20 @@ class StellarClassifierApp:
         self.bayesian_check.grid(row=0, column=5, padx=(0, 12))
         self.bayesian_check.configure(state="disabled")
 
-        ttk.Label(action_bar, text="N:").grid(row=0, column=6, padx=(0, 4))
-        self.n_stars_entry = ttk.Entry(action_bar, textvariable=self.n_stars_var, width=8)
-        self.n_stars_entry.grid(row=0, column=7, padx=(0, 8))
+        self.variables_check = ttk.Checkbutton(
+            action_bar,
+            text="Solo variables",
+            variable=self.only_variables_var,
+        )
+        self.variables_check.grid(row=0, column=6, padx=(0, 12))
 
-        ttk.Label(action_bar, text="Max pc:").grid(row=0, column=8, padx=(0, 4))
+        ttk.Label(action_bar, text="N:").grid(row=0, column=7, padx=(0, 4))
+        self.n_stars_entry = ttk.Entry(action_bar, textvariable=self.n_stars_var, width=8)
+        self.n_stars_entry.grid(row=0, column=8, padx=(0, 8))
+
+        ttk.Label(action_bar, text="Max pc:").grid(row=0, column=9, padx=(0, 4))
         self.max_dist_entry = ttk.Entry(action_bar, textvariable=self.max_dist_var, width=8)
-        self.max_dist_entry.grid(row=0, column=9)
+        self.max_dist_entry.grid(row=0, column=10)
 
     def _set_status(self, text: str) -> None:
         """Actualiza la barra inferior con un mensaje de estado."""
@@ -382,10 +397,14 @@ class StellarClassifierApp:
                 self.root.after(0, lambda: self.variables_panel.set_status("Sin distancias P-L en la muestra"))
                 return
 
+            n_pl_finite = int(np.isfinite(df["distance_pc_PL"].to_numpy(dtype=float)).sum())
+            n_dist_finite = int(np.isfinite(df[dist_col].to_numpy(dtype=float)).sum())
             mask = np.isfinite(df["distance_pc_PL"].to_numpy(dtype=float)) & np.isfinite(df[dist_col].to_numpy(dtype=float))
+            
             if not mask.any():
-                self.root.after(0, lambda: messagebox.showinfo("Validación P-L", "No hay objetos con ambas distancias (P-L y geom/bayes) finitas."))
-                self.root.after(0, lambda: self.variables_panel.set_status("Sin pares de distancias finitas"))
+                msg = f"No hay objetos con ambas distancias finitas.\nDistancias P-L finitas: {n_pl_finite}\nDistancias {dist_col} finitas: {n_dist_finite}"
+                self.root.after(0, lambda msg=msg: messagebox.showinfo("Validación P-L", msg))
+                self.root.after(0, lambda: self.variables_panel.set_status(f"Análisis P-L: insuficientes datos coincidentes"))
                 return
 
             pl = df.loc[mask, "distance_pc_PL"].to_numpy(dtype=float)
@@ -394,7 +413,7 @@ class StellarClassifierApp:
             median_frac = float(np.median(frac))
             n = int(mask.sum())
             msg = f"Objetos comparados: {n}\nMediana diferencia fraccional: {median_frac:.3f}"
-            self.root.after(0, lambda: messagebox.showinfo("Validación P-L", msg))
+            self.root.after(0, lambda msg=msg: messagebox.showinfo("Validación P-L", msg))
             self.root.after(0, lambda: self.variables_panel.set_status(f"Validación completa: {n} objetos"))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -456,7 +475,7 @@ class StellarClassifierApp:
 
         self._download_thread = threading.Thread(
             target=self._download_worker,
-            args=(n_stars, max_dist),
+            args=(n_stars, max_dist, self.only_variables_var.get()),
             daemon=True,
         )
         self._download_thread.start()
@@ -469,10 +488,10 @@ class StellarClassifierApp:
             return
         self._set_download_controls(True)
 
-    def _download_worker(self, n_stars: int, max_dist: float) -> None:
+    def _download_worker(self, n_stars: int, max_dist: float, only_variables: bool = False) -> None:
         """Ejecuta la consulta Gaia fuera del hilo principal de Tkinter."""
         try:
-            df = query_gaia_sample(n_stars=n_stars, max_dist_pc=max_dist)
+            df = query_gaia_sample(n_stars=n_stars, max_dist_pc=max_dist, only_variables=only_variables)
             # Tkinter no es thread-safe: la actualizacion de la GUI vuelve al hilo principal.
             self.root.after(100, lambda: self._on_download_success(df))
         except Exception as exc:
@@ -523,6 +542,14 @@ class StellarClassifierApp:
     def _on_download_error(self, message: str) -> None:
         self._set_status(f"error: {message}")
         messagebox.showerror("Error de descarga", message)
+
+    def _on_point_selected(self, info: dict) -> None:
+        """Actualiza el panel lateral con info de la estrella seleccionada."""
+        try:
+            if hasattr(self, "detail_panel") and self.detail_panel is not None:
+                self.detail_panel.set_details(info)
+        except Exception:
+            pass
 
     def _process_data(self) -> None:
         """Deriva magnitudes fisicas y actualiza la tabla y las estadisticas."""
@@ -656,6 +683,15 @@ class StellarClassifierApp:
                 use_bayesian=self.bayesian_var.get(),
                 isochrones_to_overlay=self.active_isochrones,
             )
+            self.plot_panel.set_point_context(self.df_processed, getattr(self.fig, "_hr_scatter", None))
+            modes = []
+            if self.extinction_var.get():
+                modes.append("extinción corregida")
+            if self.bayesian_var.get():
+                modes.append("bayesiano")
+            mode = " + ".join(modes) if modes else "bruto"
+            self.plot_panel.set_display_mode(mode)
+            self.plot_panel.capture_view_limits()
             self.plot_panel.draw()
             self._set_status("grafica lista")
         except Exception as exc:

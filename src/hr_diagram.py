@@ -39,6 +39,17 @@ def plot_hr(
         fig = ax.figure
         ax.clear()
 
+    previous_colorbar = getattr(fig, "_hr_colorbar", None)
+    if previous_colorbar is not None:
+        try:
+            previous_colorbar.ax.remove()
+        except Exception:
+            try:
+                previous_colorbar.remove()
+            except Exception:
+                pass
+        fig._hr_colorbar = None
+
     # Seleccionar columnas activas según los toggles disponibles.
     teff_col = "teff"
     mg_col = "M_G"
@@ -56,7 +67,9 @@ def plot_hr(
         s=12,
         alpha=0.8,
         linewidths=0,
+        picker=5,
     )
+    fig._hr_scatter = scatter
 
     for bound in SPECTRAL_BOUNDS:
         ax.axvline(bound, color="gray", linestyle=":", linewidth=0.8)
@@ -90,11 +103,25 @@ def plot_hr(
 
     # Convencion astronomica: temperatura decrece hacia la derecha.
     ax.invert_xaxis()
+    # Ajustar limites del eje x para recortar espacio vacío a la izquierda
+    # (se hace DESPUÉS de invertir para evitar conflictos con gráficas repetidas)
+    try:
+        teff_vals = df[teff_col].dropna()
+        if not teff_vals.empty:
+            tmin = float(teff_vals.min())
+            tmax = float(teff_vals.max())
+            trange = max(tmax - tmin, 1.0)
+            pad = trange * 0.05
+            # Para eje invertido: xlim(max, min)
+            ax.set_xlim(tmax + pad, tmin - pad)
+    except Exception:
+        pass
     # Magnitud absoluta creciente hacia abajo.
     ax.invert_yaxis()
 
     colorbar = fig.colorbar(scatter, ax=ax)
     colorbar.set_label("T_eff [K]")
+    fig._hr_colorbar = colorbar
 
     fig.tight_layout()
     return fig

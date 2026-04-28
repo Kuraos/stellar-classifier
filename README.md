@@ -12,6 +12,7 @@ incluyendo procesamiento fisico y una interfaz grafica interactiva en Tkinter.
 - Calculo de magnitud absoluta, distancia y luminosidad solar.
 - Clasificacion espectral OBAFGKM.
 - Diagrama Hertzsprung-Russell embebido con herramientas de zoom/pan.
+- Inspeccion de puntos del HR con clic y control visible del modo de grafico.
 - Tabla ordenable de resultados y exportacion a CSV.
 - Distancias bayesianas (Bailer-Jones et al. 2021) como alternativa a 1000/parallax.
 - Isócronas PARSEC (Bressan et al. 2012) para superponer modelos teóricos sobre el HR.

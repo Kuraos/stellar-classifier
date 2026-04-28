@@ -77,9 +77,16 @@ def _validate_required_columns(df: pd.DataFrame) -> None:
         raise RuntimeError(f"Faltan columnas esperadas en Gaia DR3: {missing}")
 
 
-def _build_query(n_stars: int, max_dist_pc: float) -> str:
-    """Construye la consulta ADQL con filtros de calidad y el join astrofisico."""
+def _build_query(n_stars: int, max_dist_pc: float, only_variables: bool = False) -> str:
+    """Construye la consulta ADQL con filtros de calidad y el join astrofisico.
+    
+    Si only_variables=True, usa INNER JOIN con vari_summary para obtener solo variables.
+    """
     min_parallax = 1000.0 / max_dist_pc
+    
+    # When only_variables, use INNER JOIN para filtrar; otherwise use LEFT JOIN
+    vs_join = "INNER JOIN" if only_variables else "LEFT JOIN"
+    
     return f"""
     SELECT TOP {int(n_stars)}
         gs.source_id,
@@ -112,7 +119,7 @@ def _build_query(n_stars: int, max_dist_pc: float) -> str:
         ON gs.source_id = ap.source_id
     LEFT JOIN external.gaiaedr3_distance AS d
         ON gs.source_id = d.source_id
-    LEFT JOIN gaiadr3.vari_summary AS vs
+    {vs_join} gaiadr3.vari_summary AS vs
         ON gs.source_id = vs.source_id
     LEFT JOIN gaiadr3.vari_classifier_result AS vcr
         ON gs.source_id = vcr.source_id
@@ -132,12 +139,13 @@ def _build_query(n_stars: int, max_dist_pc: float) -> str:
     """.strip()
 
 
-def query_gaia_sample(n_stars: int = 5000, max_dist_pc: float = 100) -> pd.DataFrame:
+def query_gaia_sample(n_stars: int = 5000, max_dist_pc: float = 100, only_variables: bool = False) -> pd.DataFrame:
     """Consulta Gaia DR3 y devuelve un DataFrame con una muestra de estrellas.
 
     Parametros:
     - n_stars: numero maximo de filas a solicitar.
     - max_dist_pc: distancia maxima del volumen de consulta en parsec.
+    - only_variables: si True, filtra solo estrellas con variabilidad clasificada.
 
     Salida:
     - DataFrame con columnas astrometricas y fotometricas.
@@ -150,8 +158,9 @@ def query_gaia_sample(n_stars: int = 5000, max_dist_pc: float = 100) -> pd.DataF
     if max_dist_pc <= 0:
         raise ValueError("max_dist_pc debe ser mayor a 0")
 
-    query = _build_query(n_stars=n_stars, max_dist_pc=max_dist_pc)
-    print(f"[Gaia] Preparando consulta para TOP {n_stars} y distancia <= {max_dist_pc} pc")
+    query = _build_query(n_stars=n_stars, max_dist_pc=max_dist_pc, only_variables=only_variables)
+    mode_str = "variables" if only_variables else "general"
+    print(f"[Gaia] Preparando consulta ({mode_str}) para TOP {n_stars} y distancia <= {max_dist_pc} pc")
 
     last_error: Exception | None = None
 

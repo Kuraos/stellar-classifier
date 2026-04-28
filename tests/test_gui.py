@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from gui.app import StellarClassifierApp
+from gui.plots import MatplotlibPanel
 
 
 @pytest.fixture
@@ -45,6 +46,35 @@ def test_app_process_and_plot_flow(tk_root, sample_processed_df) -> None:
 
     app._plot_data()
     assert len(app.ax.collections) >= 1
+    assert app.plot_panel.mode_var.get() == "Modo: bruto"
+
+
+def test_matplotlib_panel_pick_event_shows_point_details(monkeypatch, tk_root, sample_processed_df) -> None:
+    panel = MatplotlibPanel(tk_root)
+    panel.current_df = sample_processed_df.copy()
+    panel.current_scatter = panel.ax.scatter(
+        sample_processed_df["teff"],
+        sample_processed_df["M_G"],
+        picker=5,
+    )
+
+    captured = {}
+
+    def fake_showinfo(title, message):
+        captured["title"] = title
+        captured["message"] = message
+
+    monkeypatch.setattr("gui.plots.messagebox.showinfo", fake_showinfo)
+
+    class Event:
+        artist = panel.current_scatter
+        ind = [0]
+
+    panel._on_pick_event(Event())
+
+    assert captured["title"] == "Detalle del punto"
+    assert "Source ID:" in captured["message"]
+    assert "T_eff:" in captured["message"]
 
 
 def test_app_process_with_extinction(monkeypatch, tk_root, sample_processed_df) -> None:

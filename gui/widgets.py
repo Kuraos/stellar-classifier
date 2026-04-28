@@ -248,6 +248,37 @@ class VariablesPanel(ttk.LabelFrame):
         self.on_validate()
 
 
+class DetailPanel(ttk.LabelFrame):
+    """Panel lateral para mostrar detalles de una estrella seleccionada."""
+
+    def __init__(self, parent: tk.Misc):
+        super().__init__(parent, text="Detalle de estrella")
+        self.columnconfigure(0, weight=1)
+        self.text = tk.Text(self, height=8, wrap="word")
+        self.text.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        self.clear()
+
+    def set_details(self, info: dict) -> None:
+        """Rellena el panel con un diccionario de campos.
+
+        Espera un diccionario simple {col: value}.
+        """
+        self.text.config(state="normal")
+        self.text.delete("1.0", tk.END)
+        if not info:
+            self.text.insert(tk.END, "Sin selección")
+        else:
+            for key, val in info.items():
+                self.text.insert(tk.END, f"{key}: {val}\n")
+        self.text.config(state="disabled")
+
+    def clear(self) -> None:
+        self.text.config(state="normal")
+        self.text.delete("1.0", tk.END)
+        self.text.insert(tk.END, "Selecciona un punto en el diagrama HR para ver detalles.")
+        self.text.config(state="disabled")
+
+
 class DataTable(ttk.Frame):
     """Tabla de datos con ordenacion por click en encabezados."""
 
