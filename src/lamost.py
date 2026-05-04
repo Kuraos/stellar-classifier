@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+import gzip
 import warnings
 
 import numpy as np
@@ -52,6 +53,17 @@ LINE_WINDOWS: dict[str, float] = {
 }
 
 SPECTRA_CACHE_DIR = Path("data/spectra")
+
+
+def _normalize_obsid(obsid: int | str | float) -> str:
+    """Normaliza obsid para URL/cache evitando sufijos '.0' en enteros."""
+    try:
+        as_float = float(obsid)
+        if np.isfinite(as_float) and as_float.is_integer():
+            return str(int(as_float))
+    except Exception:
+        pass
+    return str(obsid).strip()
 
 
 def _empty_crossmatch_df() -> pd.DataFrame:
@@ -236,10 +248,33 @@ def _read_lamost_fits(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
 
             # Caso preferido: LAMOST con HDU[1] y filas [0]=flux, [2]=log10(lambda)
             if len(hdul) > 1 and hdul[1].data is not None:
-                arr = np.asarray(hdul[1].data)
-                if arr.ndim >= 2 and arr.shape[0] > 2:
-                    flux_data = np.asarray(arr[0], dtype=float)
-                    wave_log = np.asarray(arr[2], dtype=float)
+                data1 = hdul[1].data
+                names = [str(n).upper() for n in getattr(data1, "names", [])] if hasattr(data1, "names") else []
+
+                # Formato BinTable comun en LAMOST DR9: columnas FLUX y WAVELENGTH.
+                if "FLUX" in names and "WAVELENGTH" in names and len(data1) > 0:
+                    flux_data = np.asarray(data1[0]["FLUX"], dtype=float)
+                    wave_vals = np.asarray(data1[0]["WAVELENGTH"], dtype=float)
+                    if np.nanmedian(wave_vals) < 100.0:
+                        wave_log = wave_vals
+                    else:
+                        wave_log = None
+                        # Marcamos con variable temporal usando wave_vals directas.
+                        wave = wave_vals
+                        flux = _normalize_flux(flux_data)
+                        mask = np.isfinite(wave) & np.isfinite(flux)
+                        wave = wave[mask]
+                        flux = flux[mask]
+                        if wave.size >= 10 and flux.size >= 10:
+                            order = np.argsort(wave)
+                            return wave[order], flux[order]
+
+                # Formato alternativo por filas: fila 0=flux, fila 2=log10(lambda)
+                if flux_data is None or wave_log is None:
+                    arr = np.asarray(data1)
+                    if arr.ndim >= 2 and arr.shape[0] > 2:
+                        flux_data = np.asarray(arr[0], dtype=float)
+                        wave_log = np.asarray(arr[2], dtype=float)
 
             # Fallback para fixtures sinteticos: PrimaryHDU con forma (4, n)
             if flux_data is None or wave_log is None:
@@ -281,10 +316,38 @@ def load_spectrum_from_cache(
     Devuelve (wavelength, flux) o None si no esta en cache.
     """
     cache_path = Path(cache_dir)
-    fits_path = cache_path / f"spec_{obsid}.fits"
+    obsid_norm = _normalize_obsid(obsid)
+    fits_path = cache_path / f"spec_{obsid_norm}.fits"
     if not fits_path.exists():
         return None
     return _read_lamost_fits(fits_path)
+
+
+def _looks_like_fits_bytes(payload: bytes) -> bool:
+    """Valida si un payload parece FITS o FITS comprimido en gzip."""
+    if not payload:
+        return False
+
+    # FITS sin comprimir inicia con cabecera SIMPLE.
+    if payload[:6] == b"SIMPLE":
+        return True
+
+    # FITS comprimido: magic gzip 1f 8b
+    if payload[:2] == b"\x1f\x8b":
+        try:
+            head = gzip.decompress(payload[:8192]) if len(payload) <= 8192 else gzip.decompress(payload)
+            return head[:6] == b"SIMPLE"
+        except Exception:
+            return False
+
+    return False
+
+
+def _decode_fits_payload(payload: bytes) -> bytes:
+    """Devuelve bytes FITS sin comprimir cuando el payload llega en gzip."""
+    if payload[:2] == b"\x1f\x8b":
+        return gzip.decompress(payload)
+    return payload
 
 
 def download_spectrum(
@@ -312,26 +375,53 @@ def download_spectrum(
 
     Referencia: LAMOST DR9 data model documentation.
     """
-    cached = load_spectrum_from_cache(obsid, cache_dir=cache_dir)
+    obsid_norm = _normalize_obsid(obsid)
+    cached = load_spectrum_from_cache(obsid_norm, cache_dir=cache_dir)
     if cached is not None:
         return cached
 
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
-    fits_path = cache_path / f"spec_{obsid}.fits"
-    url = f"https://www.lamost.org/dr9/api/spectra/fits/{obsid}"
+    fits_path = cache_path / f"spec_{obsid_norm}.fits"
+
+    # Endpoint principal solicitado + fallback observado operativo en DR9.
+    url_candidates = [
+        f"https://www.lamost.org/dr9/api/spectra/fits/{obsid_norm}",
+        f"https://www.lamost.org/dr9/spectrum/fits/{obsid_norm}",
+    ]
+
+    response_content: bytes | None = None
+    last_exc: Exception | None = None
+    for url in url_candidates:
+        try:
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+            content = response.content
+            if not _looks_like_fits_bytes(content):
+                last_exc = ValueError("respuesta no FITS (posible HTML de error)")
+                continue
+            response_content = _decode_fits_payload(content)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+
+    if response_content is None:
+        warnings.warn(
+            "download_spectrum: no se pudo descargar obsid="
+            f"{obsid_norm}: {last_exc}"
+        )
+        return None
 
     try:
-        response = requests.get(url, timeout=timeout)
-        response.raise_for_status()
-        fits_path.write_bytes(response.content)
+        fits_path.write_bytes(response_content)
     except Exception as exc:
-        warnings.warn(f"download_spectrum: no se pudo descargar obsid={obsid}: {exc}")
+        warnings.warn(f"download_spectrum: no se pudo escribir cache obsid={obsid_norm}: {exc}")
         return None
 
     parsed = _read_lamost_fits(fits_path)
     if parsed is None:
-        warnings.warn(f"download_spectrum: FITS invalido para obsid={obsid}")
+        warnings.warn(f"download_spectrum: FITS invalido para obsid={obsid_norm}")
     return parsed
 
 
