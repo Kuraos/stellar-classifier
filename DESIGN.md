@@ -111,6 +111,45 @@ Interacción con el flujo del proyecto:
 | K    | 3 700 – 5 200    | Naranja          |
 | M    | < 3 700          | Rojo             |
 
+### 2.8 Estrellas variables Gaia DR3
+
+El módulo `src/variables.py` normaliza la taxonomía de variabilidad de Gaia DR3 a claves cortas y estables para que la GUI, la tabla y el diagrama HR compartan la misma nomenclatura.
+
+- `VARIABLE_MARKERS` mapea alias y variantes de Gaia a claves canónicas cortas: `DCEP`, `T2CEP`, `RRAB`, `RRC`, `ECL`, `MIRA` y `ROT`.
+- `VARIABLE_LABELS` traduce esas claves a etiquetas humanas para el panel lateral y el resumen estadístico.
+- `VARIABLE_PLOT_STYLE` define marcadores, colores, tamaños y `zorder` para dibujar cada tipo variable en el HR.
+- `PERIOD_LUMINOSITY_TYPES = {"DCEP", "T2CEP", "RRAB", "RRC"}` agrupa los tipos que ya tienen relación período-luminosidad implementada.
+- `classify_variable_type(...)` devuelve `non_variable`, `OTHER` o una de las claves cortas anteriores.
+- `add_variability_columns(df)` añade `variable_type`, `is_variable`, `pl_period_days` y `distance_pc_PL` sin romper DataFrames que no contengan columnas de variabilidad.
+- La distancia P-L usa `phot_g_mean_mag` como aproximación de la magnitud V; queda anotado un TODO para aplicar la transformación G→V de Evans et al. (2018) cuando se requiera precisión publicable.
+- En la GUI, el toggle principal y los checkboxes del panel `Estrellas variables` llaman a `_on_variable_filter_changed`, que refresca el HR con `plot_hr(..., highlight_variables=True, variable_types_to_show=...)`.
+
+### 2.9 Espectros LAMOST
+
+LAMOST DR9 aporta millones de espectros publicos de baja resolucion (R~1800)
+en el rango aproximado 3700-9000 A. En este proyecto, se integra una ruta
+espectroscopica complementaria al pipeline fotometrico de Gaia.
+
+- Cross-match por coordenadas contra Vizier (`V/164`) con radio de 2 arcsec.
+- Cache local en `data/spectra/spec_{obsid}.fits` para evitar descargas repetidas.
+- Analisis de lineas diagnosticas: H_alpha, H_beta, H_gamma, Ca II K/H, Mg I b y Na I D.
+- Medicion de anchos equivalentes via ajuste gaussiano de absorcion.
+- Estimacion de tipo espectral Harvard independiente a partir de W_Halpha.
+- Estimacion de `T_eff` espectroscopica con relacion empirica simple de Gray (2008):
+
+```
+T_eff ~= 9000 * exp(-0.18 * W_Halpha) + 3500
+```
+
+- Validacion cruzada contra `T_eff` fotometrica (Ballesteros 2012).
+- La GUI permite click en HR para cargar y mostrar el espectro asociado en la
+   pestana nueva de espectroscopia.
+
+Limitacion conocida:
+
+- La comparacion fotometrica-espectroscopica todavia no aplica transformacion
+   G->V (TODO futuro con Evans et al. 2018) para escenarios de precision alta.
+
 ---
 
 ## 3. Arquitectura del proyecto
@@ -216,17 +255,37 @@ Retorna un diccionario con las métricas que la GUI va a mostrar en paneles:
 }
 ```
 
-### 4.4 `src/hr_diagram.py`
+### 4.4 `src/variables.py`
 
-**Función principal:** `plot_hr(df, ax=None) -> matplotlib.figure.Figure`
+**Funciones principales:**
+
+- `classify_variable_type(class_name, period_days=None, classification_result=None) -> str`
+- `cepheid_distance(g_mag, period_days, is_type2=False) -> np.ndarray`
+- `rrlyrae_distance(g_mag, period_days, metallicity=-1.5) -> np.ndarray`
+- `add_variability_columns(df) -> pd.DataFrame`
+- `compare_distances(df, distance_col="distance_pc", pl_col="distance_pc_PL") -> dict`
+
+Comportamiento esperado:
+
+- `classify_variable_type` devuelve únicamente claves cortas compatibles con el panel GUI o `non_variable`.
+- `add_variability_columns` nunca deja `variable_type` en `None` o `NaN`; las filas sin evidencia quedan marcadas como `non_variable`.
+- Los periodos con relación P-L reconocida se elevan a `DCEP`, `T2CEP`, `RRAB` o `RRC` según corresponda.
+- `VARIABLE_LABELS` y `VARIABLE_PLOT_STYLE` son los puntos de extensión para la vista de usuario y el marcado visual del HR.
+- El código debe degradar silenciosamente cuando falten columnas Gaia de variabilidad.
+
+### 4.5 `src/hr_diagram.py`
+
+**Función principal:** `plot_hr(df, ax=None, use_corrected=False, use_bayesian=False, isochrones_to_overlay=None, highlight_variables=False, variable_types_to_show=None) -> matplotlib.figure.Figure`
 
 - Si `ax` es `None`, crea una figura nueva. Si se pasa un `ax`, dibuja sobre él (clave para embeber en Tkinter).
 - Scatter coloreado por T_eff con colormap `RdYlBu_r`.
 - Ejes invertidos (convención astronómica: T decreciente a la derecha, M creciente hacia abajo).
 - Líneas verticales punteadas marcando los límites de tipos espectrales OBAFGKM.
 - Colorbar con T_eff en Kelvin.
+- Cuando `highlight_variables=True`, el scatter base se atenúa, las variables se superponen con estilos de `src/variables.py` y la leyenda solo aparece si hay tipos visibles.
+- Si faltan columnas de variabilidad, la función degrada silenciosamente al comportamiento normal.
 
-### 4.5 `gui/app.py` — **Interfaz gráfica (requisito central)**
+### 4.6 `gui/app.py` — **Interfaz gráfica (requisito central)**
 
 **Stack:** Tkinter (biblioteca estándar, no requiere instalación) + matplotlib embebido.
 
@@ -268,7 +327,7 @@ Retorna un diccionario con las métricas que la GUI va a mostrar en paneles:
    - `Descargar datos` → llama a `query_gaia_sample()` en un hilo separado (sin congelar la GUI). Muestra progreso en la barra de estado.
    - `Procesar` → aplica las conversiones de `temperature.py` a la tabla cargada y calcula estadísticas.
    - `Corregir extinción` → activa la corrección de Bayestar19 antes del cálculo de estadisticas y la grafica.
-   - `Graficar` → llama a `plot_hr(df, ax=self.ax)` sobre el canvas embebido.
+   - `Graficar` → llama a `plot_hr(df, ax=self.ax, highlight_variables=..., variable_types_to_show=...)` sobre el canvas embebido.
    - `Exportar CSV` → guarda el DataFrame procesado en `results/stars_processed.csv`.
 
 La GUI además precarga Bayestar2019 en un hilo de fondo al arrancar. Esto
@@ -283,6 +342,13 @@ el mismo momento en que el usuario pulsa `Procesar`.
    - Dos secciones: "Estadísticas generales" y "Distribución espectral".
    - Valores se actualizan tras `Procesar`.
    - Usar `ttk.Label` con fuente monospace para alineación.
+
+   La GUI también incorpora un panel `Estrellas variables` en ese lateral:
+
+   - El toggle principal activa o desactiva el resaltado de variables en el HR.
+   - Los checkboxes por tipo filtran qué clases variables se dibujan.
+   - Tras procesar, el panel muestra un resumen con conteos y cuántas estrellas tienen distancia P-L.
+   - El cambio de filtros llama a `_on_variable_filter_changed`, que vuelve a dibujar el HR con los tipos activos.
 
 4. **Tabla inferior** (`ttk.Treeview` con `show="headings"`):
    - Columnas ordenables al click en el header.
@@ -304,7 +370,7 @@ self.stats: dict | None                 # output de compute_statistics
 self.fig, self.ax                       # matplotlib embebido
 ```
 
-### 4.6 `main.py`
+### 4.7 `main.py`
 
 Archivo minimalista que solo lanza la interfaz:
 

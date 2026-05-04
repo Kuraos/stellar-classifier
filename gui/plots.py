@@ -45,6 +45,10 @@ class MatplotlibPanel(ttk.Frame):
 
         self.clear(message="Presiona 'Graficar' para mostrar el diagrama HR")
 
+    def update_ax(self, new_ax: plt.Axes) -> None:
+        """Actualiza la referencia al eje tras un redibujo completo."""
+        self.ax = new_ax
+
     def clear(self, message: str = "") -> None:
         """Limpia el eje actual y opcionalmente muestra un mensaje central."""
         self.ax.clear()

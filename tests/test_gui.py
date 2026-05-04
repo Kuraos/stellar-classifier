@@ -227,3 +227,78 @@ def test_isochrone_dropdown_populates_and_overlays(monkeypatch, tk_root, tmp_pat
 
     app._clear_isochrones()
     assert len(app.active_isochrones) == 0
+
+
+def test_variables_panel_disabled_before_process(tk_root, sample_processed_df) -> None:
+    """El panel de variables debe quedar deshabilitado tras la descarga."""
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    app._on_download_success(sample_processed_df)
+    assert str(app.variables_panel.validate_btn.cget("state")) == "disabled"
+
+
+def test_variables_panel_enabled_after_process(tk_root, sample_processed_df) -> None:
+    """El panel de variables se habilita después del procesamiento."""
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    df = sample_processed_df[["source_id", "ra", "dec", "parallax", "phot_g_mean_mag", "bp_rp"]].copy()
+    app.df_raw = df
+    app._process_data()
+    assert app.df_processed is not None
+    assert str(app.variables_panel.validate_btn.cget("state")) == "normal"
+
+
+def test_variable_type_column_in_table_after_process(tk_root, sample_processed_df) -> None:
+    """La columna variable_type debe existir en el resultado procesado y en la tabla."""
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    df = sample_processed_df[["source_id", "ra", "dec", "parallax", "phot_g_mean_mag", "bp_rp"]].copy()
+    app.df_raw = df
+    app._process_data()
+
+    assert app.df_processed is not None
+    assert "variable_type" in app.df_processed.columns
+    assert any(column[0] == "variable_type" for column in app.data_table.columns)
+
+
+def test_show_variables_toggle_triggers_replot(monkeypatch, tk_root, sample_processed_df) -> None:
+    """Al activar el toggle de variables se debe refrescar el HR."""
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    df = sample_processed_df[["source_id", "ra", "dec", "parallax", "phot_g_mean_mag", "bp_rp"]].copy()
+    app.df_raw = df
+    app._process_data()
+
+    calls = {"count": 0}
+
+    def fake_plot_data() -> None:
+        calls["count"] += 1
+
+    monkeypatch.setattr(app, "_plot_data", fake_plot_data)
+
+    app.variables_panel.show_vars_var.set(True)
+    app.variables_panel._on_show_vars_changed()
+
+    assert calls["count"] >= 1
+
+
+def test_spectroscopy_tab_exists(tk_root) -> None:
+    """La pestana Espectroscopia existe en el Notebook."""
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    tab_names = [
+        app.notebook.tab(i, "text")
+        for i in range(app.notebook.index("end"))
+    ]
+    assert any("spectro" in name.lower() or "espec" in name.lower() for name in tab_names)
+
+
+def test_spectroscopy_panel_set_status(tk_root) -> None:
+    """set_status actualiza el texto del panel sin excepcion."""
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    app.spectroscopy_panel.set_status("prueba de estado")
+    app.root.update()
+
+
+def test_crossmatch_disabled_without_data(tk_root) -> None:
+    """Cross-match sin datos procesados debe mostrar error."""
+    app = StellarClassifierApp(tk_root, preload_bayestar=False)
+    app._start_crossmatch()
+    app.root.update()
+    status = app.spectroscopy_panel.status_var.get()
+    assert "error" in status.lower() or "primero" in status.lower()

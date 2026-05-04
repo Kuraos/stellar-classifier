@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from src.isochrones import filter_evolutionary_phases, isochrone_to_observables
+from src.variables import VARIABLE_LABELS, VARIABLE_PLOT_STYLE
 
 SPECTRAL_BOUNDS = [30000, 10000, 7500, 6000, 5200, 3700]
 
@@ -22,6 +23,8 @@ def plot_hr(
     use_corrected: bool = False,
     use_bayesian: bool = False,
     isochrones_to_overlay: list[dict] | None = None,
+    highlight_variables: bool = False,
+    variable_types_to_show: set[str] | None = None,
 ) -> plt.Figure:
     """Dibuja un diagrama HR usando T_eff y M_G.
 
@@ -59,16 +62,89 @@ def plot_hr(
     elif use_bayesian and "M_G_bayesian" in df.columns:
         mg_col = "M_G_bayesian"
 
-    scatter = ax.scatter(
-        df[teff_col],
-        df[mg_col],
-        c=df[teff_col],
-        cmap="RdYlBu_r",
-        s=12,
-        alpha=0.8,
-        linewidths=0,
-        picker=5,
-    )
+    scatter = None
+    if highlight_variables and "variable_type" in df.columns and not df.empty:
+        variable_series = df["variable_type"].fillna("non_variable").astype(str).str.strip()
+        normalized_types = variable_series.str.upper()
+        mask_variable = ~normalized_types.isin({"NON_VARIABLE", "", "NAN", "NONE"})
+
+        if mask_variable.any():
+            df_non_var = df.loc[~mask_variable]
+            df_var = df.loc[mask_variable]
+            visible_types = None if variable_types_to_show is None else set(variable_types_to_show)
+
+            if not df_non_var.empty:
+                scatter = ax.scatter(
+                    df_non_var[teff_col],
+                    df_non_var[mg_col],
+                    c=df_non_var[teff_col],
+                    cmap="RdYlBu_r",
+                    s=8,
+                    alpha=0.25,
+                    linewidths=0,
+                    picker=5,
+                    label="_nolegend_",
+                )
+            else:
+                scatter = ax.scatter(
+                    df[teff_col],
+                    df[mg_col],
+                    c=df[teff_col],
+                    cmap="RdYlBu_r",
+                    s=1,
+                    alpha=0.0,
+                    linewidths=0,
+                    picker=5,
+                    label="_nolegend_",
+                )
+
+            visible_variable_types: list[str] = []
+            variable_subset_types = normalized_types.loc[df_var.index]
+            for variable_type, style in VARIABLE_PLOT_STYLE.items():
+                if visible_types is not None and variable_type not in visible_types:
+                    continue
+
+                subset = df_var.loc[variable_subset_types.eq(variable_type)]
+                if subset.empty:
+                    continue
+
+                ax.scatter(
+                    subset[teff_col],
+                    subset[mg_col],
+                    marker=style["marker"],
+                    color=style["color"],
+                    s=style["size"],
+                    zorder=style["zorder"],
+                    linewidths=0.5,
+                    label=VARIABLE_LABELS.get(variable_type, variable_type),
+                )
+                visible_variable_types.append(variable_type)
+
+            if visible_variable_types:
+                ax.legend(loc="upper left", fontsize=8)
+        else:
+            scatter = ax.scatter(
+                df[teff_col],
+                df[mg_col],
+                c=df[teff_col],
+                cmap="RdYlBu_r",
+                s=12,
+                alpha=0.8,
+                linewidths=0,
+                picker=5,
+            )
+    else:
+        scatter = ax.scatter(
+            df[teff_col],
+            df[mg_col],
+            c=df[teff_col],
+            cmap="RdYlBu_r",
+            s=12,
+            alpha=0.8,
+            linewidths=0,
+            picker=5,
+        )
+
     fig._hr_scatter = scatter
 
     for bound in SPECTRAL_BOUNDS:
@@ -100,6 +176,12 @@ def plot_hr(
 
         if any(overlay.get("label") for overlay in isochrones_to_overlay):
             ax.legend(loc="upper left", fontsize=8, frameon=True)
+
+    if highlight_variables and any(label for label in VARIABLE_LABELS):
+        handles, labels = ax.get_legend_handles_labels()
+        visible_labels = [label for label in labels if label and not label.startswith("_")]
+        if visible_labels:
+            ax.legend(loc="upper left", fontsize=8)
 
     # Convencion astronomica: temperatura decrece hacia la derecha.
     ax.invert_xaxis()

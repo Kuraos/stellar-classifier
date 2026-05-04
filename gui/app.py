@@ -13,12 +13,21 @@ from tkinter import messagebox, ttk
 
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 
 from data.download import query_gaia_sample
 from src.extinction import apply_extinction_correction, prime_bayestar_cache
 from src.distances import best_distance_bayesian, absolute_magnitude_bayesian
 from gui.plots import MatplotlibPanel
-from gui.widgets import DataTable, IsochronePanel, StatisticsPanel, StatusBar, VariablesPanel, DetailPanel
+from gui.widgets import (
+    DataTable,
+    DetailPanel,
+    IsochronePanel,
+    SpectroscopyPanel,
+    StatisticsPanel,
+    StatusBar,
+    VariablesPanel,
+)
 from src.hr_diagram import plot_hr
 from src.isochrones import fit_best_age, list_available_isochrones, load_isochrone
 from src.statistics import compute_statistics
@@ -63,6 +72,13 @@ class StellarClassifierApp:
         self.available_isochrones: list[dict] = []
         self.active_isochrones: list[dict] = []
         self._isochrone_colors = ["tab:red", "tab:blue", "tab:green", "tab:orange", "tab:purple"]
+        self.df_crossmatch: pd.DataFrame | None = None
+        self.df_spectra_results: pd.DataFrame | None = None
+        self._mpl_click_cid: int | None = None
+        self._hr_kdtree: cKDTree | None = None
+        self._hr_kdtree_scale: np.ndarray | None = None
+        self._hr_kdtree_source_ids: np.ndarray | None = None
+        self._hr_kdtree_cols: tuple[str, str] | None = None
 
         self.n_stars_var = tk.IntVar(value=5000)
         self.max_dist_var = tk.IntVar(value=100)
@@ -79,13 +95,24 @@ class StellarClassifierApp:
     def _build_layout(self) -> None:
         """Construye la disposicion general de la interfaz."""
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(1, weight=3)
-        self.root.rowconfigure(2, weight=2)
+        self.root.rowconfigure(1, weight=1)
 
         self._build_action_bar()
 
-        content_frame = ttk.Frame(self.root)
-        content_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=6)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.grid(row=1, column=0, sticky="nsew", padx=8, pady=6)
+
+        tab_hr = ttk.Frame(self.notebook)
+        tab_spec = ttk.Frame(self.notebook)
+        self.notebook.add(tab_hr, text="Diagrama HR")
+        self.notebook.add(tab_spec, text="Espectroscopia")
+
+        tab_hr.columnconfigure(0, weight=1)
+        tab_hr.rowconfigure(0, weight=3)
+        tab_hr.rowconfigure(1, weight=2)
+
+        content_frame = ttk.Frame(tab_hr)
+        content_frame.grid(row=0, column=0, sticky="nsew")
         content_frame.columnconfigure(0, weight=3)
         content_frame.columnconfigure(1, weight=2)
         content_frame.rowconfigure(0, weight=1)
@@ -106,6 +133,8 @@ class StellarClassifierApp:
         right_frame.columnconfigure(0, weight=1)
         right_frame.rowconfigure(0, weight=1)
         right_frame.rowconfigure(1, weight=0)
+        right_frame.rowconfigure(2, weight=0)
+        right_frame.rowconfigure(3, weight=1)
 
         self.stats_panel = StatisticsPanel(right_frame)
         self.stats_panel.grid(row=0, column=0, sticky="nsew")
@@ -119,9 +148,14 @@ class StellarClassifierApp:
         self.isochrone_panel.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         self.isochrone_panel.set_loading()
 
-        self.variables_panel = VariablesPanel(right_frame, on_validate=self._validate_pl)
+        self.variables_panel = VariablesPanel(
+            right_frame,
+            on_validate=self._validate_pl,
+            on_filter_change=self._on_variable_filter_changed,
+        )
         self.variables_panel.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         self.variables_panel.set_status("Panel de variables: esperando descarga")
+        self.variables_panel.set_enabled(False)
 
         # Panel lateral de detalle para la estrella seleccionada
         self.detail_panel = DetailPanel(right_frame)
@@ -129,8 +163,8 @@ class StellarClassifierApp:
         # Wire the plot selection callback to update the detail panel
         self.plot_panel.on_point_selected = lambda info: self._on_point_selected(info)
 
-        table_frame = ttk.LabelFrame(self.root, text="Tabla de datos")
-        table_frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=6)
+        table_frame = ttk.LabelFrame(tab_hr, text="Tabla de datos")
+        table_frame.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
 
@@ -145,12 +179,199 @@ class StellarClassifierApp:
             ("M_G", "M_G", 80),
             ("luminosity_solar", "L/L_sun", 90),
             ("spectral_type", "Tipo", 70),
+            ("variable_type", "Tipo var.", 90),
         ]
         self.data_table = DataTable(table_frame, columns=table_columns)
         self.data_table.grid(row=0, column=0, sticky="nsew")
 
+        tab_spec.columnconfigure(0, weight=1)
+        tab_spec.rowconfigure(0, weight=1)
+        self.spectroscopy_panel = SpectroscopyPanel(
+            tab_spec,
+            on_crossmatch=self._start_crossmatch,
+            on_batch_analyse=self._start_batch_analyse,
+        )
+        self.spectroscopy_panel.grid(row=0, column=0, sticky="nsew")
+
         self.status_bar = StatusBar(self.root)
-        self.status_bar.grid(row=3, column=0, sticky="ew")
+        self.status_bar.grid(row=2, column=0, sticky="ew")
+
+    def _get_hr_columns(self) -> tuple[str, str]:
+        """Selecciona columnas activas de HR segun toggles y disponibilidad."""
+        if self.df_processed is None or self.df_processed.empty:
+            return "teff", "M_G"
+
+        teff_col = "teff"
+        mg_col = "M_G"
+        if self.extinction_var.get() and {"teff_corr", "M_G_corr"}.issubset(self.df_processed.columns):
+            teff_col = "teff_corr"
+            mg_col = "M_G_corr"
+        elif self.bayesian_var.get() and "M_G_bayesian" in self.df_processed.columns:
+            mg_col = "M_G_bayesian"
+        return teff_col, mg_col
+
+    def _rebuild_hr_kdtree(self) -> None:
+        """Reconstruye el KDTree de HR para habilitar click cercano a estrellas."""
+        self._hr_kdtree = None
+        self._hr_kdtree_scale = None
+        self._hr_kdtree_source_ids = None
+        self._hr_kdtree_cols = None
+
+        if self.df_processed is None or self.df_processed.empty:
+            return
+
+        teff_col, mg_col = self._get_hr_columns()
+        if teff_col not in self.df_processed.columns or mg_col not in self.df_processed.columns:
+            return
+
+        x = pd.to_numeric(self.df_processed[teff_col], errors="coerce").to_numpy(dtype=float)
+        y = pd.to_numeric(self.df_processed[mg_col], errors="coerce").to_numpy(dtype=float)
+        sid = self.df_processed.get("source_id", pd.Series(np.arange(len(self.df_processed))))
+        source_ids = sid.astype(str).to_numpy()
+
+        mask = np.isfinite(x) & np.isfinite(y)
+        if not mask.any():
+            return
+
+        pts = np.column_stack([x[mask], y[mask]])
+        scale = np.nanstd(pts, axis=0)
+        scale[~np.isfinite(scale)] = 1.0
+        scale[scale == 0] = 1.0
+        pts_norm = pts / scale
+
+        self._hr_kdtree = cKDTree(pts_norm)
+        self._hr_kdtree_scale = scale
+        self._hr_kdtree_source_ids = source_ids[mask]
+        self._hr_kdtree_cols = (teff_col, mg_col)
+
+    def _connect_hr_click(self) -> None:
+        """Conecta el evento de click sobre el HR."""
+        if self.fig is None or self.df_crossmatch is None:
+            return
+        if self._mpl_click_cid is not None and self.fig.canvas is not None:
+            self.fig.canvas.mpl_disconnect(self._mpl_click_cid)
+        self._mpl_click_cid = self.fig.canvas.mpl_connect("button_press_event", self._on_hr_click)
+
+    def _on_hr_click(self, event) -> None:
+        """Atiende click en HR y muestra espectro si la estrella tiene match LAMOST."""
+        if self.df_processed is None or self.df_processed.empty:
+            return
+        if self.df_crossmatch is None or self.df_crossmatch.empty:
+            return
+        if event is None or event.xdata is None or event.ydata is None:
+            return
+
+        if self._hr_kdtree is None or self._hr_kdtree_scale is None or self._hr_kdtree_source_ids is None:
+            self._rebuild_hr_kdtree()
+        if self._hr_kdtree is None or self._hr_kdtree_scale is None or self._hr_kdtree_source_ids is None:
+            return
+
+        click_norm = np.array([float(event.xdata), float(event.ydata)], dtype=float) / self._hr_kdtree_scale
+        dist, idx = self._hr_kdtree.query(click_norm, k=1)
+        if not np.isfinite(dist) or dist > 0.05:
+            return
+
+        source_id = str(self._hr_kdtree_source_ids[int(idx)])
+        match = self.df_crossmatch.loc[self.df_crossmatch["source_id"].astype(str) == source_id]
+        if match.empty:
+            self.notebook.select(1)
+            self.spectroscopy_panel.clear_spectrum()
+            self.spectroscopy_panel.set_status("la estrella seleccionada no tiene espectro LAMOST")
+            return
+
+        obs_row = match.iloc[0]
+        obsid = obs_row.get("obsid")
+        snrg = obs_row.get("snrg")
+        class_lamost = obs_row.get("class_lamost")
+        subclass_lamost = obs_row.get("subclass_lamost")
+        teff_phot = None
+        row_src = self.df_processed.loc[self.df_processed["source_id"].astype(str) == source_id]
+        if not row_src.empty and "teff" in row_src.columns:
+            teff_raw = row_src.iloc[0].get("teff")
+            try:
+                teff_phot = float(teff_raw)
+            except Exception:
+                teff_phot = None
+
+        self.notebook.select(1)
+        self.spectroscopy_panel.set_status("analizando espectro seleccionado...")
+
+        def worker() -> None:
+            from src.lamost import analyse_star_spectrum
+
+            result = analyse_star_spectrum(
+                source_id=source_id,
+                obsid=obsid,
+                teff_photometric=teff_phot,
+            )
+            result["snrg"] = snrg
+            result["class_lamost"] = class_lamost
+            result["subclass_lamost"] = subclass_lamost
+            self.root.after(0, lambda r=result: self.spectroscopy_panel.show_spectrum(r))
+            if result.get("success"):
+                self.root.after(0, lambda: self.spectroscopy_panel.set_status("espectro cargado"))
+            else:
+                self.root.after(0, lambda: self.spectroscopy_panel.set_status(f"error: {result.get('error') or 'sin detalle'}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_crossmatch(self) -> None:
+        """Lanza el cross-match LAMOST en background."""
+        if self.df_processed is None or self.df_processed.empty:
+            self.spectroscopy_panel.set_status("error: primero descarga y procesa datos")
+            return
+
+        self.spectroscopy_panel.set_status("buscando espectros en LAMOST...")
+
+        def worker() -> None:
+            from src.lamost import crossmatch_lamost
+
+            try:
+                df_match = crossmatch_lamost(self.df_processed, radius_arcsec=2.0, max_stars=500)
+                self.df_crossmatch = df_match
+                n = len(df_match)
+                self.root.after(0, lambda d=df_match: self.spectroscopy_panel.set_crossmatch_results(d))
+                self.root.after(0, lambda: self.spectroscopy_panel.set_status(
+                    f"cross-match listo: {n} estrellas con espectro LAMOST"
+                ))
+                self.root.after(0, self._connect_hr_click)
+            except Exception as exc:
+                msg = str(exc)
+                self.root.after(0, lambda m=msg: self.spectroscopy_panel.set_status(f"error en cross-match: {m}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_batch_analyse(self) -> None:
+        """Lanza el analisis en lote en background con progreso."""
+        if self.df_crossmatch is None or self.df_crossmatch.empty:
+            self.spectroscopy_panel.set_status("error: primero busca espectros LAMOST")
+            return
+
+        def worker() -> None:
+            from src.lamost import batch_analyse_spectra
+
+            def progress(n_done: int, n_total: int) -> None:
+                self.root.after(0, lambda: self.spectroscopy_panel.set_status(
+                    f"analizando espectros: {n_done}/{n_total}..."
+                ))
+
+            try:
+                df_results = batch_analyse_spectra(
+                    self.df_crossmatch,
+                    self.df_processed,
+                    max_spectra=100,
+                    progress_callback=progress,
+                )
+                self.df_spectra_results = df_results
+                n_ok = int(df_results["success"].sum()) if "success" in df_results.columns else 0
+                self.root.after(0, lambda: self.spectroscopy_panel.set_status(
+                    f"analisis listo: {n_ok} espectros procesados correctamente"
+                ))
+            except Exception as exc:
+                msg = str(exc)
+                self.root.after(0, lambda m=msg: self.spectroscopy_panel.set_status(f"error en analisis: {m}"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_action_bar(self) -> None:
         """Crea la barra superior con acciones y parametros de consulta."""
@@ -277,6 +498,11 @@ class StellarClassifierApp:
 
     def _refresh_hr_plot(self) -> None:
         """Redibuja el HR si ya hay datos procesados."""
+        if self.df_processed is not None and not self.df_processed.empty:
+            self._plot_data()
+
+    def _on_variable_filter_changed(self, active_types: set[str] | None) -> None:
+        """Refresca el HR cuando cambia el filtro de variables."""
         if self.df_processed is not None and not self.df_processed.empty:
             self._plot_data()
 
@@ -524,6 +750,15 @@ class StellarClassifierApp:
         self.df_raw = df
         self.df_processed = None
         self.stats = None
+        self.df_crossmatch = None
+        self.df_spectra_results = None
+        self._hr_kdtree = None
+        self._hr_kdtree_scale = None
+        self._hr_kdtree_source_ids = None
+        if hasattr(self, "spectroscopy_panel"):
+            self.spectroscopy_panel.set_crossmatch_results(pd.DataFrame())
+            self.spectroscopy_panel.clear_spectrum()
+            self.spectroscopy_panel.set_status("esperando cross-match LAMOST")
         self.stats_panel.clear()
         self.data_table.set_dataframe(pd.DataFrame(columns=[
             "source_id",
@@ -544,19 +779,11 @@ class StellarClassifierApp:
             self.bayesian_check.configure(state="normal")
         else:
             self.bayesian_check.configure(state="disabled")
-        # Habilitar panel de variables si la descarga incluyo columnas de variabilidad
-        if {"best_class_name", "in_vari_classification_result"}.intersection(df.columns):
-            try:
-                self.variables_panel.set_status("Columnas de variabilidad detectadas")
-                self.variables_panel.set_enabled(True)
-            except Exception:
-                pass
-        else:
-            try:
-                self.variables_panel.set_status("No hay columnas de variabilidad en la descarga")
-                self.variables_panel.set_enabled(False)
-            except Exception:
-                pass
+        try:
+            self.variables_panel.set_status("Descarga lista. Procesa para detectar variables.")
+            self.variables_panel.set_enabled(False)
+        except Exception:
+            pass
 
     def _on_download_error(self, message: str) -> None:
         self._set_status(f"error: {message}")
@@ -648,11 +875,21 @@ class StellarClassifierApp:
             # Enriquecemos el DataFrame con columnas de variabilidad si están presentes
             try:
                 df = add_variability_columns(df)
-            except Exception:
-                # No bloquear por errores en columnas opcionales de variabilidad
-                pass
+                n_vars = int(df["is_variable"].sum()) if "is_variable" in df.columns else 0
+                self.root.after(
+                    0,
+                    lambda n=n_vars: self.variables_panel.set_status(
+                        f"{n} estrellas variables detectadas en la muestra"
+                        if n > 0 else "Sin variables detectadas en esta muestra"
+                    ),
+                )
+                self.variables_panel.set_enabled(True)
+            except Exception as var_exc:
+                self.variables_panel.set_status(f"Error en variables: {var_exc}")
+                self.variables_panel.set_enabled(False)
 
             self.df_processed = df
+            self._rebuild_hr_kdtree()
             self.stats = compute_statistics(df)
 
             self.stats_panel.update_from_stats(self.stats)
@@ -676,6 +913,8 @@ class StellarClassifierApp:
                 "luminosity_solar",
                 "spectral_type",
             ]
+            if "variable_type" in df.columns:
+                table_cols.append("variable_type")
             shown, total = self.data_table.set_dataframe(df[table_cols], max_rows=500)
 
             suffix = " con correccion de extincion" if self.extinction_var.get() else ""
@@ -695,12 +934,23 @@ class StellarClassifierApp:
 
         self._set_status("graficando diagrama HR...")
         try:
+            self.fig.clf()
+            self.ax = self.fig.add_subplot(111)
+            if hasattr(self.plot_panel, "update_ax"):
+                self.plot_panel.update_ax(self.ax)
+            else:
+                self.plot_panel.ax = self.ax
+
+            show_vars = self.variables_panel.get_show_variables()
+            active_types = self.variables_panel.get_active_types() if show_vars else None
             plot_hr(
                 self.df_processed,
                 ax=self.ax,
                 use_corrected=self.extinction_var.get(),
                 use_bayesian=self.bayesian_var.get(),
                 isochrones_to_overlay=self.active_isochrones,
+                highlight_variables=show_vars,
+                variable_types_to_show=active_types if show_vars else None,
             )
             self.plot_panel.set_point_context(self.df_processed, getattr(self.fig, "_hr_scatter", None))
             modes = []
@@ -708,10 +958,16 @@ class StellarClassifierApp:
                 modes.append("extinción corregida")
             if self.bayesian_var.get():
                 modes.append("bayesiano")
+            if show_vars:
+                modes.append("variables")
             mode = " + ".join(modes) if modes else "bruto"
             self.plot_panel.set_display_mode(mode)
             self.plot_panel.capture_view_limits()
             self.plot_panel.draw()
+            if self.df_crossmatch is not None and not self.df_crossmatch.empty:
+                self._connect_hr_click()
+            if hasattr(self.plot_panel, "toolbar") and self.plot_panel.toolbar is not None:
+                self.plot_panel.toolbar.update()
             self._set_status("grafica lista")
         except Exception as exc:
             self._set_status(f"error: {exc}")

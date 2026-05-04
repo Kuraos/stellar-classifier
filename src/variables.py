@@ -21,31 +21,48 @@ from numpy.typing import ArrayLike
 
 
 VARIABLE_MARKERS: dict[str, str] = {
-    "T2CEP": "type2_cepheid",
-    "DCEPS": "classical_cepheid",
-    "DCEP": "classical_cepheid",
-    "CEPHEID": "classical_cepheid",
-    "RRAB": "rrlyrae_ab",
-    "RRC": "rrlyrae_c",
-    "RRD": "rrlyrae_double_mode",
-    "ECL": "eclipsing_binary",
-    "EA": "eclipsing_binary",
-    "EB": "eclipsing_binary",
-    "EW": "eclipsing_binary",
-    "MIRA": "mira_variable",
-    "SRV": "semi_regular_variable",
-    "SR": "semi_regular_variable",
-    "BY_DRA": "rotational_variable",
-    "ROT": "rotational_variable",
-    "SPOT": "rotational_variable",
+    "T2CEP": "T2CEP",
+    "DCEPS": "DCEP",
+    "DCEP": "DCEP",
+    "CEPHEID": "DCEP",
+    "RRAB": "RRAB",
+    "RRC": "RRC",
+    "RRD": "RRC",
+    "ECL": "ECL",
+    "EA": "ECL",
+    "EB": "ECL",
+    "EW": "ECL",
+    "MIRA": "MIRA",
+    "SRV": "MIRA",
+    "SR": "MIRA",
+    "BY_DRA": "ROT",
+    "ROT": "ROT",
+    "SPOT": "ROT",
 }
 
-PERIOD_LUMINOSITY_TYPES = {
-    "classical_cepheid",
-    "type2_cepheid",
-    "rrlyrae_ab",
-    "rrlyrae_c",
+VARIABLE_LABELS: dict[str, str] = {
+    "DCEP": "Cefeida clásica",
+    "T2CEP": "Cefeida tipo II",
+    "RRAB": "RR Lyrae ab",
+    "RRC": "RR Lyrae c",
+    "ECL": "Eclipsante",
+    "MIRA": "Mira/Semirregular",
+    "ROT": "Rotacional",
+    "OTHER": "Otras",
 }
+
+VARIABLE_PLOT_STYLE: dict[str, dict[str, object]] = {
+    "DCEP": {"marker": "*", "color": "gold", "zorder": 6, "size": 80},
+    "T2CEP": {"marker": "P", "color": "darkorange", "zorder": 6, "size": 70},
+    "RRAB": {"marker": "s", "color": "crimson", "zorder": 6, "size": 50},
+    "RRC": {"marker": "D", "color": "salmon", "zorder": 6, "size": 50},
+    "ECL": {"marker": "o", "color": "lightblue", "zorder": 5, "size": 40},
+    "MIRA": {"marker": "v", "color": "darkred", "zorder": 6, "size": 60},
+    "ROT": {"marker": "^", "color": "mediumpurple", "zorder": 5, "size": 40},
+    "OTHER": {"marker": "X", "color": "gray", "zorder": 4, "size": 40},
+}
+
+PERIOD_LUMINOSITY_TYPES = {"DCEP", "T2CEP", "RRAB", "RRC"}
 
 
 def _as_array(values: ArrayLike) -> np.ndarray:
@@ -89,7 +106,11 @@ def classify_variable_type(
     cleaned = _normalize_text(class_name)
     if cleaned:
         for marker, normalized in VARIABLE_MARKERS.items():
-            if cleaned == marker or cleaned.startswith(f"{marker}_") or cleaned.endswith(f"_{marker}"):
+            if (
+                cleaned == marker
+                or cleaned.startswith(f"{marker}_")
+                or cleaned.endswith(f"_{marker}")
+            ):
                 return normalized
 
     if classification_result is not None:
@@ -100,7 +121,7 @@ def classify_variable_type(
             pass
 
     if _finite_period(period_days) > 0:
-        return "other_variable"
+        return "OTHER"
 
     return "non_variable"
 
@@ -187,6 +208,8 @@ def _apparent_g_magnitude(df: pd.DataFrame) -> np.ndarray:
     """Elige la mejor magnitud G disponible para la estimación P-L."""
     if "phot_g_mean_mag_corr" in df.columns:
         return df["phot_g_mean_mag_corr"].to_numpy(dtype=float)
+    # TODO: aplicar transformación G→V de Evans et al. (2018) para precisión publicable.
+    # Actualmente usamos G como aproximación.
     return df["phot_g_mean_mag"].to_numpy(dtype=float)
 
 
@@ -219,33 +242,34 @@ def add_variability_columns(df: pd.DataFrame) -> pd.DataFrame:
 
         variable_type = classify_variable_type(
             class_name,
+            period_days=cepheid_period if np.isfinite(cepheid_period) else rrlyrae_period,
             classification_result=classification_flag[idx] if idx < len(classification_flag) else None,
         )
 
         # Gaia puede devolver clases genéricas como SOLAR_LIKE aunque la fila
         # venga de tablas específicas de Cepheids o RR Lyrae. En ese caso,
         # usamos el periodo disponible para fijar un subtipo utilizable para P-L.
-        if variable_type == "non_variable" or variable_type == "other_variable":
+        if variable_type in {"non_variable", "OTHER"}:
             if np.isfinite(cepheid_period):
-                variable_type = "classical_cepheid"
+                variable_type = "DCEP"
             elif np.isfinite(rrlyrae_period):
-                variable_type = "rrlyrae_ab"
+                variable_type = "RRAB"
             elif bool(classification_flag[idx] if idx < len(classification_flag) else False):
-                variable_type = "other_variable"
+                variable_type = "OTHER"
 
         period_value = np.nan
         distance_value = np.nan
-        if variable_type in {"classical_cepheid", "type2_cepheid"}:
+        if variable_type in {"DCEP", "T2CEP"}:
             period_value = cepheid_period
             if np.isfinite(period_value):
                 distance_value = float(
                     cepheid_distance(
                         g_mag[idx],
                         period_value,
-                        is_type2=variable_type == "type2_cepheid",
+                        is_type2=variable_type == "T2CEP",
                     )[0]
                 )
-        elif variable_type in {"rrlyrae_ab", "rrlyrae_c", "rrlyrae_double_mode"}:
+        elif variable_type in {"RRAB", "RRC"}:
             period_value = rrlyrae_period
             if np.isfinite(period_value):
                 distance_value = float(

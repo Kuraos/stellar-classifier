@@ -6,3 +6,5 @@ results/*.csv
 .ipynb_checkpoints/
 .vscode/
 .idea/
+data/spectra/*.fits
+data/spectra/*.csv

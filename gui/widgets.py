@@ -3,10 +3,27 @@
 from __future__ import annotations
 
 from datetime import datetime
+from collections.abc import Callable
 import tkinter as tk
 from tkinter import ttk
 
+import numpy as np
 import pandas as pd
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+
+from src.variables import VARIABLE_LABELS
+
+
+SPECTRAL_LINES_GUI: dict[str, float] = {
+    "H_alpha": 6562.8,
+    "H_beta": 4861.3,
+    "H_gamma": 4340.5,
+    "Ca_II_K": 3933.7,
+    "Ca_II_H": 3968.5,
+    "Mg_I_b": 5183.6,
+    "Na_I_D": 5895.9,
+}
 
 
 class StatisticsPanel(ttk.LabelFrame):
@@ -23,6 +40,10 @@ class StatisticsPanel(ttk.LabelFrame):
 
         self.spectral_frame = ttk.LabelFrame(self, text="Distribucion espectral")
         self.spectral_frame.pack(fill=tk.X, padx=8, pady=8)
+
+        self.variables_frame = ttk.LabelFrame(self, text="Variables detectadas")
+        self.variables_frame.pack(fill=tk.X, padx=8, pady=8)
+        self.variables_frame.pack_forget()
 
         self.general_vars = {
             "n_stars": tk.StringVar(value="N estrellas:      -"),
@@ -65,6 +86,16 @@ class StatisticsPanel(ttk.LabelFrame):
 
         ttk.Label(row3, textvariable=self.spectral_vars["M"], style="Mono.TLabel").pack(side=tk.LEFT)
 
+        self.var_summary_var = tk.StringVar(value="")
+        self.var_count_label = ttk.Label(
+            self.variables_frame,
+            textvariable=self.var_summary_var,
+            style="Mono.TLabel",
+            wraplength=260,
+            justify="left",
+        )
+        self.var_count_label.pack(anchor="w", padx=8, pady=4)
+
     def clear(self) -> None:
         """Reinicia valores del panel a estado vacio."""
         self.general_vars["n_stars"].set("N estrellas:      -")
@@ -75,6 +106,8 @@ class StatisticsPanel(ttk.LabelFrame):
         self.general_vars["distance_rescued"].set("Rescatadas BJ:   -")
         for key in self.spectral_vars:
             self.spectral_vars[key].set(f"{key}: 0")
+        self.var_summary_var.set("")
+        self.variables_frame.pack_forget()
 
     def update_from_stats(self, stats: dict) -> None:
         """Actualiza labels a partir del diccionario de metricas."""
@@ -99,6 +132,32 @@ class StatisticsPanel(ttk.LabelFrame):
         distribution = stats.get("spectral_distribution", {})
         for key in self.spectral_vars:
             self.spectral_vars[key].set(f"{key}: {int(distribution.get(key, 0))}")
+
+        variability = stats.get("variability")
+        if variability and variability.get("n_variables", 0) > 0:
+            counts = variability.get("counts_by_type", {})
+            n_vars = int(variability.get("n_variables", 0))
+            n_total = int(stats.get("n_stars", 0))
+            fraction = 100.0 * n_vars / n_total if n_total > 0 else 0.0
+            n_pl = int(variability.get("n_with_pl_distance", 0))
+
+            lines = [f"Total: {n_vars} ({fraction:.1f}%)"]
+            for tipo, count in counts.items():
+                tipo_str = str(tipo)
+                if tipo_str.lower() in {"non_variable", "nan", "none", ""}:
+                    continue
+                if int(count) <= 0:
+                    continue
+                label = VARIABLE_LABELS.get(tipo_str, tipo_str)
+                lines.append(f"  {label}: {int(count)}")
+            if n_pl > 0:
+                lines.append(f"Con dist. P-L: {n_pl}")
+
+            self.var_summary_var.set("\n".join(lines))
+            self.variables_frame.pack(fill=tk.X, padx=8, pady=8)
+        else:
+            self.var_summary_var.set("")
+            self.variables_frame.pack_forget()
 
 
 class IsochronePanel(ttk.LabelFrame):
@@ -203,16 +262,27 @@ class VariablesPanel(ttk.LabelFrame):
     Provee checkboxes por grupos y un boton para lanzar la validacion P-L.
     """
 
-    def __init__(self, parent: tk.Misc, on_validate):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        on_validate: Callable[[], None],
+        on_filter_change: Callable[[set[str] | None], None] | None = None,
+    ):
         super().__init__(parent, text="Estrellas variables")
         self.on_validate = on_validate
+        self.on_filter_change = on_filter_change
         self.status_var = tk.StringVar(value="No hay columnas de variabilidad")
 
         self.columnconfigure(0, weight=1)
 
         # Master toggle para mostrar variables en el HR
         self.show_vars_var = tk.BooleanVar(value=False)
-        self.chk_show = ttk.Checkbutton(self, text="Mostrar variables en HR", variable=self.show_vars_var)
+        self.chk_show = ttk.Checkbutton(
+            self,
+            text="Mostrar variables en HR",
+            variable=self.show_vars_var,
+            command=self._on_show_vars_changed,
+        )
         self.chk_show.grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
 
         # Simple checkboxes por tipo (colapsado en primera iteracion)
@@ -222,7 +292,12 @@ class VariablesPanel(ttk.LabelFrame):
         self.type_checks: dict[str, ttk.Checkbutton] = {}
         for i, label in enumerate(["DCEP", "RRAB", "RRC", "MIRA", "ECL", "OTHER"]):
             v = tk.BooleanVar(value=True)
-            cb = ttk.Checkbutton(types_frame, text=label, variable=v)
+            cb = ttk.Checkbutton(
+                types_frame,
+                text=label,
+                variable=v,
+                command=self._on_type_filter_changed,
+            )
             cb.grid(row=0, column=i, sticky="w", padx=(0, 6))
             self.type_vars[label] = v
             self.type_checks[label] = cb
@@ -244,6 +319,31 @@ class VariablesPanel(ttk.LabelFrame):
 
     def set_status(self, message: str) -> None:
         self.status_var.set(message)
+
+    def get_active_types(self) -> set[str]:
+        """Devuelve el conjunto de tipos activos según los checkboxes."""
+        return {
+            label
+            for label, var in self.type_vars.items()
+            if var.get()
+        }
+
+    def get_show_variables(self) -> bool:
+        """Devuelve True si el toggle principal está activo."""
+        return self.show_vars_var.get()
+
+    def _on_type_filter_changed(self) -> None:
+        """Notifica al app cuando cambia el filtro de tipos."""
+        if self.on_filter_change is not None:
+            self.on_filter_change(self.get_active_types())
+
+    def _on_show_vars_changed(self) -> None:
+        """Notifica al app cuando cambia el toggle principal."""
+        if self.on_filter_change is not None:
+            if self.show_vars_var.get():
+                self.on_filter_change(self.get_active_types())
+            else:
+                self.on_filter_change(None)
 
     def _handle_validate(self) -> None:
         self.on_validate()
@@ -278,6 +378,205 @@ class DetailPanel(ttk.LabelFrame):
         self.text.delete("1.0", tk.END)
         self.text.insert(tk.END, "Selecciona un punto en el diagrama HR para ver detalles.")
         self.text.config(state="disabled")
+
+
+class SpectroscopyPanel(ttk.Frame):
+    """Panel de espectroscopia con visor, tabla de lineas y estado."""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        on_crossmatch: Callable[[], None],
+        on_batch_analyse: Callable[[], None],
+    ):
+        super().__init__(master)
+        self.on_crossmatch = on_crossmatch
+        self.on_batch_analyse = on_batch_analyse
+        self._crossmatch_df: pd.DataFrame | None = None
+
+        self.columnconfigure(0, weight=3)
+        self.columnconfigure(1, weight=2)
+        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=0)
+
+        left = ttk.LabelFrame(self, text="Espectro")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=1)
+
+        self.figure = Figure(figsize=(6, 3.5), dpi=100)
+        self.ax = self.figure.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=left)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+        right = ttk.LabelFrame(self, text="Lineas espectrales")
+        right.grid(row=0, column=1, sticky="nsew", pady=(0, 6))
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=1)
+
+        cols = ("line", "lambda", "ew", "fitted")
+        self.lines_tree = ttk.Treeview(right, columns=cols, show="headings", height=8)
+        self.lines_tree.heading("line", text="Linea")
+        self.lines_tree.heading("lambda", text="lambda (A)")
+        self.lines_tree.heading("ew", text="EW (A)")
+        self.lines_tree.heading("fitted", text="Ajustada")
+        self.lines_tree.column("line", width=90, anchor="w")
+        self.lines_tree.column("lambda", width=85, anchor="center")
+        self.lines_tree.column("ew", width=85, anchor="center")
+        self.lines_tree.column("fitted", width=80, anchor="center")
+        self.lines_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+        summary = ttk.Frame(right)
+        summary.grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 6))
+        summary.columnconfigure(0, weight=1)
+
+        self.type_var = tk.StringVar(value="Tipo espectral (EW): -")
+        self.teff_spec_var = tk.StringVar(value="T_eff espectrosc.: -")
+        self.teff_phot_var = tk.StringVar(value="T_eff fotometrica: -")
+        self.teff_diff_var = tk.StringVar(value="Diferencia: -")
+        self.obsid_var = tk.StringVar(value="LAMOST obsid: -")
+        self.snr_var = tk.StringVar(value="S/N (G band): -")
+        self.class_var = tk.StringVar(value="Clase LAMOST: -")
+
+        ttk.Label(summary, textvariable=self.type_var).grid(row=0, column=0, sticky="w")
+        ttk.Label(summary, textvariable=self.teff_spec_var).grid(row=1, column=0, sticky="w")
+        ttk.Label(summary, textvariable=self.teff_phot_var).grid(row=2, column=0, sticky="w")
+        ttk.Label(summary, textvariable=self.teff_diff_var).grid(row=3, column=0, sticky="w")
+        ttk.Label(summary, textvariable=self.obsid_var).grid(row=4, column=0, sticky="w")
+        ttk.Label(summary, textvariable=self.snr_var).grid(row=5, column=0, sticky="w")
+        ttk.Label(summary, textvariable=self.class_var).grid(row=6, column=0, sticky="w")
+
+        bottom = ttk.Frame(self)
+        bottom.grid(row=1, column=0, columnspan=2, sticky="ew")
+        bottom.columnconfigure(2, weight=1)
+
+        self.btn_crossmatch = ttk.Button(bottom, text="Buscar espectros LAMOST", command=self.on_crossmatch)
+        self.btn_crossmatch.grid(row=0, column=0, padx=(0, 8), pady=4)
+
+        self.btn_batch = ttk.Button(bottom, text="Analizar muestra", command=self.on_batch_analyse)
+        self.btn_batch.grid(row=0, column=1, padx=(0, 12), pady=4)
+
+        self.status_var = tk.StringVar(value="Estado: listo")
+        ttk.Label(bottom, textvariable=self.status_var).grid(row=0, column=2, sticky="w")
+
+        self.clear_spectrum()
+
+    def set_status(self, message: str) -> None:
+        """Actualiza el mensaje de estado del panel."""
+        self.status_var.set(f"Estado: {message}")
+
+    def set_crossmatch_results(self, df: pd.DataFrame) -> None:
+        """Guarda internamente resultados de cross-match."""
+        self._crossmatch_df = df.copy() if df is not None else None
+
+    def get_crossmatch_df(self) -> pd.DataFrame | None:
+        """Devuelve el DataFrame de cross-match almacenado."""
+        return self._crossmatch_df
+
+    def clear_spectrum(self) -> None:
+        """Limpia grafico, tabla y resumen del panel espectroscopico."""
+        self.ax.clear()
+        self.ax.text(
+            0.5,
+            0.5,
+            "Selecciona una estrella del HR con espectro LAMOST",
+            transform=self.ax.transAxes,
+            ha="center",
+            va="center",
+            color="dimgray",
+        )
+        self.ax.set_axis_off()
+        self.canvas.draw_idle()
+
+        self.lines_tree.delete(*self.lines_tree.get_children())
+        self.type_var.set("Tipo espectral (EW): -")
+        self.teff_spec_var.set("T_eff espectrosc.: -")
+        self.teff_phot_var.set("T_eff fotometrica: -")
+        self.teff_diff_var.set("Diferencia: -")
+        self.obsid_var.set("LAMOST obsid: -")
+        self.snr_var.set("S/N (G band): -")
+        self.class_var.set("Clase LAMOST: -")
+
+    def show_spectrum(self, result: dict) -> None:
+        """Dibuja espectro, llena tabla EW y actualiza resumen textual."""
+        if not result or not result.get("success"):
+            self.clear_spectrum()
+            err = result.get("error") if isinstance(result, dict) else "error desconocido"
+            self.set_status(f"error: {err}")
+            return
+
+        wave = np.asarray(result.get("wavelength", []), dtype=float)
+        flux = np.asarray(result.get("flux", []), dtype=float)
+        ew_dict = result.get("equivalent_widths", {}) or {}
+
+        self.ax.clear()
+        self.ax.set_axis_on()
+        self.ax.plot(wave, flux, color="black", linewidth=0.9, label="Flujo normalizado")
+        self.ax.set_xlabel("Longitud de onda [A]")
+        self.ax.set_ylabel("Flujo relativo")
+        self.ax.set_title("Espectro LAMOST")
+        self.ax.grid(alpha=0.25)
+
+        line_colors = {
+            "H_alpha": "red",
+            "H_beta": "royalblue",
+            "Ca_II_K": "green",
+        }
+        for name, wl in SPECTRAL_LINES_GUI.items():
+            color = line_colors.get(name, "gray")
+            self.ax.axvline(wl, color=color, linestyle="--", alpha=0.55, linewidth=0.9)
+
+        self.canvas.draw_idle()
+
+        self.lines_tree.delete(*self.lines_tree.get_children())
+        for name, wl in SPECTRAL_LINES_GUI.items():
+            item = ew_dict.get(name, {})
+            ew = item.get("EW", np.nan)
+            fitted = bool(item.get("fitted", False))
+            ew_str = f"{float(ew):.3f}" if np.isfinite(ew) else "NaN"
+            self.lines_tree.insert(
+                "",
+                tk.END,
+                values=(name, f"{wl:.1f}", ew_str, "si" if fitted else "no"),
+            )
+
+        spt = result.get("spectral_type_spec", "?")
+        teff_spec = result.get("teff_spectroscopic")
+        teff_phot = result.get("teff_photometric")
+        teff_diff_k = result.get("teff_diff_K")
+        teff_diff_pct = result.get("teff_diff_pct")
+
+        self.type_var.set(f"Tipo espectral (EW): {spt}")
+        if teff_spec is not None and np.isfinite(teff_spec):
+            self.teff_spec_var.set(f"T_eff espectrosc.: {float(teff_spec):.0f} K")
+        else:
+            self.teff_spec_var.set("T_eff espectrosc.: NaN")
+
+        if teff_phot is not None and np.isfinite(float(teff_phot)):
+            self.teff_phot_var.set(f"T_eff fotometrica: {float(teff_phot):.0f} K")
+        else:
+            self.teff_phot_var.set("T_eff fotometrica: -")
+
+        if teff_diff_k is None or teff_diff_pct is None:
+            self.teff_diff_var.set("Diferencia: -")
+        else:
+            self.teff_diff_var.set(f"Diferencia: {float(teff_diff_k):+.0f} K ({float(teff_diff_pct):+.1f}%)")
+
+        obsid = result.get("obsid", "-")
+        self.obsid_var.set(f"LAMOST obsid: {obsid}")
+
+        snrg = result.get("snrg", np.nan)
+        if snrg is not None and np.isfinite(float(snrg)):
+            self.snr_var.set(f"S/N (G band): {float(snrg):.1f}")
+        else:
+            self.snr_var.set("S/N (G band): -")
+
+        class_lamost = result.get("class_lamost")
+        subclass_lamost = result.get("subclass_lamost")
+        if class_lamost is None and subclass_lamost is None:
+            self.class_var.set("Clase LAMOST: -")
+        else:
+            self.class_var.set(f"Clase LAMOST: {class_lamost or '-'} / {subclass_lamost or '-'}")
 
 
 class DataTable(ttk.Frame):
