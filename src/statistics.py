@@ -97,8 +97,17 @@ def compute_statistics(df: pd.DataFrame) -> dict:
         )
         unique, counts = np.unique(types, return_counts=True)
         counts_map = {k: int(v) for k, v in zip(unique.tolist(), counts.tolist())}
-        n_vars = int(sum(v for k, v in counts_map.items() if k != "OTHER"))
-        n_with_pl = int(np.sum(np.isfinite(df.get("distance_pc_PL", np.array([np.nan]))).astype(int)))
+        NON_VARIABLE_LABELS = {"non_variable", "nan", "none", "OTHER", ""}
+        n_vars = int(sum(
+            v for k, v in counts_map.items()
+            if k.lower() not in {label.lower() for label in NON_VARIABLE_LABELS}
+        ))
+        if "distance_pc_PL" in df.columns:
+            n_with_pl = int(np.sum(
+                np.isfinite(df["distance_pc_PL"].to_numpy(dtype=float))
+            ))
+        else:
+            n_with_pl = 0
         variability_summary = {
             "counts_by_type": counts_map,
             "n_variables": n_vars,

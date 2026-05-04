@@ -172,12 +172,13 @@ class IsochronePanel(ttk.LabelFrame):
 
     def set_enabled(self, enabled: bool) -> None:
         """Activa o desactiva los controles del panel."""
-        state = "normal" if enabled else "disabled"
-        combo_state = "readonly" if enabled and self.available_isochrones else "disabled"
+        has_isochrones = bool(self.available_isochrones)
+        combo_state = "readonly" if (enabled and has_isochrones) else "disabled"
+        btn_state = "normal" if (enabled and has_isochrones) else "disabled"
         self.combo.configure(state=combo_state)
-        self.overlay_btn.configure(state=state if enabled and self.available_isochrones else "disabled")
-        self.clear_btn.configure(state=state if enabled and self.available_isochrones else "disabled")
-        self.fit_btn.configure(state=state if enabled and self.available_isochrones else "disabled")
+        self.overlay_btn.configure(state=btn_state)
+        self.clear_btn.configure(state=btn_state)
+        self.fit_btn.configure(state=btn_state)
 
     def get_selected_isochrone(self) -> dict | None:
         """Devuelve el metadato de la isócrona seleccionada."""
@@ -217,12 +218,14 @@ class VariablesPanel(ttk.LabelFrame):
         # Simple checkboxes por tipo (colapsado en primera iteracion)
         types_frame = ttk.Frame(self)
         types_frame.grid(row=1, column=0, sticky="ew", padx=8)
-        self.type_vars = {}
+        self.type_vars: dict[str, tk.BooleanVar] = {}
+        self.type_checks: dict[str, ttk.Checkbutton] = {}
         for i, label in enumerate(["DCEP", "RRAB", "RRC", "MIRA", "ECL", "OTHER"]):
             v = tk.BooleanVar(value=True)
             cb = ttk.Checkbutton(types_frame, text=label, variable=v)
             cb.grid(row=0, column=i, sticky="w", padx=(0, 6))
             self.type_vars[label] = v
+            self.type_checks[label] = cb
 
         self.validate_btn = ttk.Button(self, text="Validar P-L", command=self._handle_validate, state="disabled")
         self.validate_btn.grid(row=2, column=0, sticky="ew", padx=8, pady=8)
@@ -232,13 +235,11 @@ class VariablesPanel(ttk.LabelFrame):
         )
 
     def set_enabled(self, enabled: bool) -> None:
+        """Activa o desactiva todos los controles del panel."""
         state = "normal" if enabled else "disabled"
-        combo_state = state
         self.chk_show.configure(state=state)
-        for v in self.type_vars.values():
-            # toggle the underlying widget state
-            # tkinter BooleanVar remains usable; we just enable/disable the button
-            pass
+        for cb in self.type_checks.values():
+            cb.configure(state=state)
         self.validate_btn.configure(state=state)
 
     def set_status(self, message: str) -> None:

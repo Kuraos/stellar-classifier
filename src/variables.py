@@ -14,7 +14,6 @@ validación rápida en GUI; no sustituyen una calibración científica detallada
 from __future__ import annotations
 
 import re
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -215,16 +214,29 @@ def add_variability_columns(df: pd.DataFrame) -> pd.DataFrame:
     metallicity = output["mh"].to_numpy(dtype=float) if "mh" in output.columns else np.full(n_rows, -1.5, dtype=float)
 
     for idx, class_name in enumerate(class_names):
+        cepheid_period = _finite_period(cepheid_periods[idx] if idx < len(cepheid_periods) else None)
+        rrlyrae_period = _finite_period(rrlyrae_periods[idx] if idx < len(rrlyrae_periods) else None)
+
         variable_type = classify_variable_type(
             class_name,
-            period_days=cepheid_periods[idx] if idx < len(cepheid_periods) else None,
             classification_result=classification_flag[idx] if idx < len(classification_flag) else None,
         )
+
+        # Gaia puede devolver clases genéricas como SOLAR_LIKE aunque la fila
+        # venga de tablas específicas de Cepheids o RR Lyrae. En ese caso,
+        # usamos el periodo disponible para fijar un subtipo utilizable para P-L.
+        if variable_type == "non_variable" or variable_type == "other_variable":
+            if np.isfinite(cepheid_period):
+                variable_type = "classical_cepheid"
+            elif np.isfinite(rrlyrae_period):
+                variable_type = "rrlyrae_ab"
+            elif bool(classification_flag[idx] if idx < len(classification_flag) else False):
+                variable_type = "other_variable"
 
         period_value = np.nan
         distance_value = np.nan
         if variable_type in {"classical_cepheid", "type2_cepheid"}:
-            period_value = _finite_period(cepheid_periods[idx] if idx < len(cepheid_periods) else None)
+            period_value = cepheid_period
             if np.isfinite(period_value):
                 distance_value = float(
                     cepheid_distance(
@@ -234,7 +246,7 @@ def add_variability_columns(df: pd.DataFrame) -> pd.DataFrame:
                     )[0]
                 )
         elif variable_type in {"rrlyrae_ab", "rrlyrae_c", "rrlyrae_double_mode"}:
-            period_value = _finite_period(rrlyrae_periods[idx] if idx < len(rrlyrae_periods) else None)
+            period_value = rrlyrae_period
             if np.isfinite(period_value):
                 distance_value = float(
                     rrlyrae_distance(
@@ -243,10 +255,10 @@ def add_variability_columns(df: pd.DataFrame) -> pd.DataFrame:
                         metallicity=metallicity[idx] if idx < len(metallicity) else -1.5,
                     )[0]
                 )
-        elif _finite_period(cepheid_periods[idx] if idx < len(cepheid_periods) else None) > 0:
-            period_value = _finite_period(cepheid_periods[idx])
-        elif _finite_period(rrlyrae_periods[idx] if idx < len(rrlyrae_periods) else None) > 0:
-            period_value = _finite_period(rrlyrae_periods[idx])
+        elif np.isfinite(cepheid_period):
+            period_value = cepheid_period
+        elif np.isfinite(rrlyrae_period):
+            period_value = rrlyrae_period
 
         variable_types.append(variable_type)
         periods.append(period_value)

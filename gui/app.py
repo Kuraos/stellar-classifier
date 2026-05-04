@@ -387,34 +387,53 @@ class StellarClassifierApp:
         self.variables_panel.set_status("Validando P-L en segundo plano...")
 
         def worker() -> None:
-            df = self.df_processed
-            # Preferir distance_pc_bayesian cuando esté activada
-            dist_col = (
-                "distance_pc_bayesian" if self.bayesian_var.get() and "distance_pc_bayesian" in df.columns else "distance_pc"
-            )
-            if "distance_pc_PL" not in df.columns:
-                self.root.after(0, lambda: messagebox.showinfo("Validación P-L", "No hay distancias P-L calculadas para esta muestra."))
-                self.root.after(0, lambda: self.variables_panel.set_status("Sin distancias P-L en la muestra"))
-                return
+            try:
+                df = self.df_processed
+                dist_col = (
+                    "distance_pc_bayesian" if self.bayesian_var.get() and "distance_pc_bayesian" in df.columns else "distance_pc"
+                )
+                if "distance_pc_PL" not in df.columns:
+                    self.root.after(0, lambda: messagebox.showinfo(
+                        "Validación P-L",
+                        "No hay distancias P-L calculadas para esta muestra."
+                    ))
+                    self.root.after(0, lambda: self.variables_panel.set_status(
+                        "Sin distancias P-L en la muestra"
+                    ))
+                    return
 
-            n_pl_finite = int(np.isfinite(df["distance_pc_PL"].to_numpy(dtype=float)).sum())
-            n_dist_finite = int(np.isfinite(df[dist_col].to_numpy(dtype=float)).sum())
-            mask = np.isfinite(df["distance_pc_PL"].to_numpy(dtype=float)) & np.isfinite(df[dist_col].to_numpy(dtype=float))
-            
-            if not mask.any():
-                msg = f"No hay objetos con ambas distancias finitas.\nDistancias P-L finitas: {n_pl_finite}\nDistancias {dist_col} finitas: {n_dist_finite}"
-                self.root.after(0, lambda msg=msg: messagebox.showinfo("Validación P-L", msg))
-                self.root.after(0, lambda: self.variables_panel.set_status(f"Análisis P-L: insuficientes datos coincidentes"))
-                return
+                try:
+                    pl_vals = pd.to_numeric(df["distance_pc_PL"], errors="coerce").to_numpy(dtype=float)
+                    ref_vals = pd.to_numeric(df[dist_col], errors="coerce").to_numpy(dtype=float)
+                except Exception as cast_exc:
+                    self.root.after(0, lambda: messagebox.showerror(
+                        "Error de validación", f"No se pudo convertir distancias: {cast_exc}"
+                    ))
+                    return
 
-            pl = df.loc[mask, "distance_pc_PL"].to_numpy(dtype=float)
-            ref = df.loc[mask, dist_col].to_numpy(dtype=float)
-            frac = np.abs(pl - ref) / np.maximum(ref, 1.0)
-            median_frac = float(np.median(frac))
-            n = int(mask.sum())
-            msg = f"Objetos comparados: {n}\nMediana diferencia fraccional: {median_frac:.3f}"
-            self.root.after(0, lambda msg=msg: messagebox.showinfo("Validación P-L", msg))
-            self.root.after(0, lambda: self.variables_panel.set_status(f"Validación completa: {n} objetos"))
+                mask = np.isfinite(pl_vals) & np.isfinite(ref_vals)
+                if not mask.any():
+                    self.root.after(0, lambda: messagebox.showinfo(
+                        "Validación P-L",
+                        "No hay objetos con ambas distancias (P-L y geom/bayes) finitas."
+                    ))
+                    self.root.after(0, lambda: self.variables_panel.set_status(
+                        "Sin pares de distancias finitas"
+                    ))
+                    return
+
+                frac = np.abs(pl_vals[mask] - ref_vals[mask]) / np.maximum(ref_vals[mask], 1.0)
+                median_frac = float(np.median(frac))
+                n = int(mask.sum())
+                msg = f"Objetos comparados: {n}\nMediana diferencia fraccional: {median_frac:.3f}"
+                self.root.after(0, lambda: messagebox.showinfo("Validación P-L", msg))
+                self.root.after(0, lambda: self.variables_panel.set_status(
+                    f"Validación completa: {n} objetos, mediana={median_frac:.3f}"
+                ))
+            except Exception as exc:
+                err_msg = str(exc)
+                self.root.after(0, lambda: messagebox.showerror("Error de validación", err_msg))
+                self.root.after(0, lambda: self.variables_panel.set_status(f"Error: {err_msg}"))
 
         threading.Thread(target=worker, daemon=True).start()
 

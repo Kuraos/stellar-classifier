@@ -14,7 +14,10 @@ def test_compute_statistics_has_expected_top_keys(sample_processed_df) -> None:
         "spectral_distribution",
         "distance_comparison",
     }
-    assert set(stats.keys()) == expected
+    # "variability" es opcional: aparece solo cuando el DataFrame
+    # contiene columna variable_type. Verificamos que las claves
+    # obligatorias siempre estén presentes.
+    assert expected.issubset(set(stats.keys()))
 
 
 def test_compute_statistics_distribution_has_all_types(sample_processed_df) -> None:
