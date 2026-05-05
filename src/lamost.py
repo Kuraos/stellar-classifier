@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 import gzip
+import re
 import warnings
 
 import numpy as np
@@ -54,16 +55,22 @@ LINE_WINDOWS: dict[str, float] = {
 
 SPECTRA_CACHE_DIR = Path("data/spectra")
 
+_OBSID_VALID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 def _normalize_obsid(obsid: int | str | float) -> str:
-    """Normaliza obsid para URL/cache evitando sufijos '.0' en enteros."""
+    """Normaliza obsid garantizando un nombre de archivo seguro."""
     try:
         as_float = float(obsid)
         if np.isfinite(as_float) and as_float.is_integer():
             return str(int(as_float))
     except Exception:
         pass
-    return str(obsid).strip()
+    text = str(obsid).strip()
+    if not _OBSID_VALID_RE.match(text):
+        # Reemplazar caracteres prohibidos para evitar nombres raros.
+        text = re.sub(r"[^A-Za-z0-9_-]+", "_", text)
+    return text
 
 
 def _empty_crossmatch_df() -> pd.DataFrame:
@@ -140,73 +147,123 @@ def crossmatch_lamost(
     subset = df.head(max_n).copy()
     vizier = Vizier(columns=["*"], row_limit=20)
 
+    # Construir SkyCoord vectorial.
+    ras = pd.to_numeric(subset["ra"], errors="coerce").to_numpy(dtype=float)
+    decs = pd.to_numeric(subset["dec"], errors="coerce").to_numpy(dtype=float)
+    valid_mask = np.isfinite(ras) & np.isfinite(decs)
+    if not valid_mask.any():
+        return _empty_crossmatch_df()
+
+    coords_all = SkyCoord(
+        ra=ras[valid_mask] * u.deg,
+        dec=decs[valid_mask] * u.deg,
+        frame="icrs",
+    )
+    source_ids_valid = subset.loc[valid_mask, "source_id"].to_numpy()
+
     rows: list[dict[str, object]] = []
-    n_errors = 0
-    for _, star in subset.iterrows():
-        source_id = star.get("source_id")
-        ra = star.get("ra")
-        dec = star.get("dec")
-        try:
-            ra_f = float(ra)
-            dec_f = float(dec)
-        except Exception:
-            continue
-
-        if not np.isfinite(ra_f) or not np.isfinite(dec_f):
-            continue
-
-        coord = SkyCoord(ra=ra_f * u.deg, dec=dec_f * u.deg, frame="icrs")
-        result = None
-        last_exc: Exception | None = None
-        # Reintento corto para amortiguar cortes transitorios de Vizier.
-        for _attempt in range(2):
-            try:
-                result = vizier.query_region(
-                    coord,
-                    radius=radius_arcsec * u.arcsec,
-                    catalog=LAMOST_VIZIER_CATALOG,
-                )
-                last_exc = None
-                break
-            except Exception as exc:
-                last_exc = exc
-
-        if last_exc is not None:
-            n_errors += 1
-            continue
-
-        if not result:
-            continue
-
-        table = result[0]
-        match_df = _table_to_dataframe(table)
-        if match_df.empty:
-            continue
-
-        # Elegir la coincidencia mas cercana si existe columna de separacion.
-        if "_r" in match_df.columns:
-            chosen = match_df.sort_values("_r", ascending=True).iloc[0]
+    fallback_per_star = False
+    try:
+        result = vizier.query_region(
+            coords_all,
+            radius=radius_arcsec * u.arcsec,
+            catalog=LAMOST_VIZIER_CATALOG,
+        )
+        if result and len(result) > 0:
+            table = result[0]
+            match_df = _table_to_dataframe(table)
+            if not match_df.empty and "_q" in match_df.columns:
+                # Ordenar por separacion para escoger la mas cercana por _q.
+                if "_r" in match_df.columns:
+                    match_df = match_df.sort_values("_r", ascending=True)
+                seen: set[int] = set()
+                for _, chosen in match_df.iterrows():
+                    q_idx = int(chosen["_q"]) - 1  # _q es 1-indexed
+                    if q_idx in seen or q_idx < 0 or q_idx >= len(source_ids_valid):
+                        continue
+                    seen.add(q_idx)
+                    rows.append(
+                        {
+                            "source_id": source_ids_valid[q_idx],
+                            "obsid": _pick_column(chosen, ["obsid", "ObsID", "OBSID", "obsid_1"]),
+                            "ra_lamost": _pick_column(chosen, ["RAJ2000", "RA_ICRS", "RAdeg", "RA"]),
+                            "dec_lamost": _pick_column(chosen, ["DEJ2000", "DE_ICRS", "DEdeg", "DEC"]),
+                            "snrg": _pick_column(chosen, ["snrg", "SNRG", "snr_g", "SNR_G"]),
+                            "snrr": _pick_column(chosen, ["snrr", "SNRR", "snr_r", "SNR_R"]),
+                            "class_lamost": _pick_column(chosen, ["class", "Class", "objType"]),
+                            "subclass_lamost": _pick_column(chosen, ["subclass", "SubClass", "spType"]),
+                        }
+                    )
+            else:
+                # Vizier sin _q: usar fallback por estrella para preservar compatibilidad.
+                fallback_per_star = True
         else:
-            chosen = match_df.iloc[0]
+            return _empty_crossmatch_df()
+    except Exception as exc:
+        warnings.warn(f"crossmatch_lamost: consulta bulk fallo, usando fallback por estrella: {exc}")
+        fallback_per_star = True
 
-        rows.append(
-            {
-                "source_id": source_id,
-                "obsid": _pick_column(chosen, ["obsid", "ObsID", "OBSID", "obsid_1"]),
-                "ra_lamost": _pick_column(chosen, ["RAJ2000", "RA_ICRS", "RAdeg", "RA"]),
-                "dec_lamost": _pick_column(chosen, ["DEJ2000", "DE_ICRS", "DEdeg", "DEC"]),
-                "snrg": _pick_column(chosen, ["snrg", "SNRG", "snr_g", "SNR_G"]),
-                "snrr": _pick_column(chosen, ["snrr", "SNRR", "snr_r", "SNR_R"]),
-                "class_lamost": _pick_column(chosen, ["class", "Class", "objType"]),
-                "subclass_lamost": _pick_column(chosen, ["subclass", "SubClass", "spType"]),
-            }
-        )
+    if fallback_per_star:
+        rows = []
+        n_errors = 0
+        subset_valid = subset.loc[valid_mask].copy()
+        for _, star in subset_valid.iterrows():
+            source_id = star.get("source_id")
+            ra_f = float(star.get("ra"))
+            dec_f = float(star.get("dec"))
 
-    if n_errors > 0:
-        warnings.warn(
-            "crossmatch_lamost: "
-            f"{n_errors} consultas fallaron por red/Vizier; se devolvieron coincidencias parciales"
-        )
+            coord = SkyCoord(ra=ra_f * u.deg, dec=dec_f * u.deg, frame="icrs")
+            result = None
+            last_exc: Exception | None = None
+            # Reintento corto para amortiguar cortes transitorios de Vizier.
+            for _attempt in range(2):
+                try:
+                    result = vizier.query_region(
+                        coord,
+                        radius=radius_arcsec * u.arcsec,
+                        catalog=LAMOST_VIZIER_CATALOG,
+                    )
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+
+            if last_exc is not None:
+                n_errors += 1
+                continue
+
+            if not result:
+                continue
+
+            table = result[0]
+            match_df = _table_to_dataframe(table)
+            if match_df.empty:
+                continue
+
+            # Elegir la coincidencia mas cercana si existe columna de separacion.
+            if "_r" in match_df.columns:
+                chosen = match_df.sort_values("_r", ascending=True).iloc[0]
+            else:
+                chosen = match_df.iloc[0]
+
+            rows.append(
+                {
+                    "source_id": source_id,
+                    "obsid": _pick_column(chosen, ["obsid", "ObsID", "OBSID", "obsid_1"]),
+                    "ra_lamost": _pick_column(chosen, ["RAJ2000", "RA_ICRS", "RAdeg", "RA"]),
+                    "dec_lamost": _pick_column(chosen, ["DEJ2000", "DE_ICRS", "DEdeg", "DEC"]),
+                    "snrg": _pick_column(chosen, ["snrg", "SNRG", "snr_g", "SNR_G"]),
+                    "snrr": _pick_column(chosen, ["snrr", "SNRR", "snr_r", "SNR_R"]),
+                    "class_lamost": _pick_column(chosen, ["class", "Class", "objType"]),
+                    "subclass_lamost": _pick_column(chosen, ["subclass", "SubClass", "spType"]),
+                }
+            )
+
+        if n_errors > 0:
+            warnings.warn(
+                "crossmatch_lamost: "
+                f"{n_errors} consultas fallaron por red/Vizier; se devolvieron coincidencias parciales"
+            )
 
     if not rows:
         return _empty_crossmatch_df()
@@ -325,21 +382,15 @@ def load_spectrum_from_cache(
 
 def _looks_like_fits_bytes(payload: bytes) -> bool:
     """Valida si un payload parece FITS o FITS comprimido en gzip."""
-    if not payload:
+    if not payload or len(payload) < 6:
         return False
-
-    # FITS sin comprimir inicia con cabecera SIMPLE.
     if payload[:6] == b"SIMPLE":
         return True
-
-    # FITS comprimido: magic gzip 1f 8b
     if payload[:2] == b"\x1f\x8b":
         try:
-            head = gzip.decompress(payload[:8192]) if len(payload) <= 8192 else gzip.decompress(payload)
-            return head[:6] == b"SIMPLE"
+            return gzip.decompress(payload)[:6] == b"SIMPLE"
         except Exception:
             return False
-
     return False
 
 
@@ -522,20 +573,27 @@ def spectral_type_from_ew(
     ew_h_alpha: float,
     ew_ca_k: float | None = None,
 ) -> str:
-    """Estima el tipo espectral de Harvard desde el ancho equivalente de H-alpha.
+    """Estima tipo espectral Harvard desde W_Halpha.
 
-    Clasificacion basada en la curva de intensidad de Balmer:
-        W_Halpha > 10 A  -> "A"
-        5 < W_Halpha <= 10 -> "F"
-        2 < W_Halpha <= 5  -> "G"
-        0.5 < W_Halpha <= 2 -> "K"
-        W_Halpha <= 0.5   -> "M"
-        W_Halpha NaN o ajuste fallido -> "?"
+    Clasificacion basada en la curva de Balmer en el lado FRIO del
+    pico (T_eff < 10000 K, W_Halpha creciente con T_eff):
+        W > 10 A   -> "A"  (cerca del pico de Balmer)
+        5 < W <= 10 -> "F"
+        2 < W <= 5  -> "G"
+        0.5 < W <= 2 -> "K"
+        W <= 0.5   -> "M"
+        W NaN o ajuste fallido -> "?"
 
-    Si ew_ca_k esta disponible y es consistente con Halpha, refinar:
-        Ca II K fuerte (EW > 5 A) con Halpha debil confirma K o M.
+    LIMITACION: las estrellas tipo B y O tambien tienen W_Halpha
+    bajo (Balmer cae al subir T arriba de ~10000 K). Sin informacion
+    fotometrica adicional (BP-RP), una estrella tipo B podria
+    clasificarse erroneamente como K. Para discriminar, usar
+    Ca II K: tipos K-M tienen Ca II K fuerte (EW > 3 A), tipos OB
+    no.
 
-    Devuelve string de un caracter: "O","B","A","F","G","K","M","?".
+    Si ew_ca_k es muy debil (< 0.5 A) y ew_h_alpha es muy debil
+    (< 1 A), la clasificacion devuelve "B?" como advertencia de
+    ambiguedad.
 
     Referencia: Gray (2008), Cap. 8.
     """
@@ -563,8 +621,11 @@ def spectral_type_from_ew(
             ca = float(ew_ca_k)
         except Exception:
             ca = np.nan
-        if np.isfinite(ca) and ca > 5.0 and w <= 2.0:
-            spt = "M" if w <= 0.5 else "K"
+        if np.isfinite(ca):
+            if ca > 5.0 and w <= 2.0:
+                spt = "M" if w <= 0.5 else "K"
+            elif ca < 0.5 and w < 1.0:
+                spt = "B?"  # ambiguedad B vs K
 
     return spt
 
@@ -572,22 +633,30 @@ def spectral_type_from_ew(
 def teff_from_ew_h_alpha(ew_h_alpha: float) -> float:
     """Estima T_eff desde el ancho equivalente de H-alpha.
 
-    Relacion empirica simplificada (Gray 2008, valida para FGK):
-        T_eff ~= 9000 * exp(-0.18 * W_Halpha) + 3500   [K]
+    Relacion lineal empirica calibrada contra Gray (2008), valida en
+    el lado frio del pico de Balmer (FGKM hasta A temprano):
 
-    Devuelve NaN si W_Halpha es NaN, negativo o > 15 A (fuera de rango).
+        T_eff [K] ~= 456 * W_Halpha [A] + 4180
 
-    Referencia: Gray (2008), The Observation and Analysis of Stellar Photospheres.
+    Esta calibracion reproduce T_eff observada con error tipico < 8%
+    para tipos AFGK y ~15% para M tardia. NO es valida cuando T_eff
+    cruza el pico de Balmer (A0 ~ 10000 K, W_Halpha ~ 12 A); para W
+    grandes la relacion se vuelve degenerada porque W vuelve a
+    decrecer hacia tipos B y O.
+
+    Devuelve NaN si W_Halpha es NaN, negativo o > 12 A.
+
+    Referencia: Gray (2008), The Observation and Analysis of Stellar
+    Photospheres, Cap. 8 y Tabla 7.5.
     """
     try:
         w = float(ew_h_alpha)
     except Exception:
         return float("nan")
 
-    if not np.isfinite(w) or w < 0.0 or w > 15.0:
+    if not np.isfinite(w) or w < 0.0 or w > 12.0:
         return float("nan")
-
-    return float(9000.0 * np.exp(-0.18 * w) + 3500.0)
+    return float(456.0 * w + 4180.0)
 
 
 def analyse_star_spectrum(

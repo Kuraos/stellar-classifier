@@ -47,6 +47,15 @@ ISOCHRONES_DIR = Path(__file__).resolve().parent.parent / "data" / "isochrones"
 class StellarClassifierApp:
     """Ventana principal y coordinadora del flujo de trabajo interactivo."""
 
+    HR_CLICK_TOLERANCE = 0.08
+    """Tolerancia para asociar click a estrella en el HR.
+
+    Las coordenadas se normalizan por la desviacion estandar de cada
+    eje, asi 0.08 corresponde a ~8% de una sigma. Suficientemente
+    laxo para muestras compactas pero estricto en muestras dispersas.
+    Empirico; ajustar si el click se siente "perdido".
+    """
+
     def __init__(self, root: tk.Tk, preload_bayestar: bool = True):
         """Construye la ventana, el estado interno y todos los widgets."""
         self.root = root
@@ -79,12 +88,16 @@ class StellarClassifierApp:
         self._hr_kdtree_scale: np.ndarray | None = None
         self._hr_kdtree_source_ids: np.ndarray | None = None
         self._hr_kdtree_cols: tuple[str, str] | None = None
+        self._hr_selected_marker = None
+        self._spectra_source_order: list[str] = []
+        self._selected_spectrum_source_id: str | None = None
 
         self.n_stars_var = tk.IntVar(value=5000)
         self.max_dist_var = tk.IntVar(value=100)
         self.extinction_var = tk.BooleanVar(value=False)
         self.bayesian_var = tk.BooleanVar(value=False)
         self.only_variables_var = tk.BooleanVar(value=False)
+        self.hr_only_lamost_var = tk.BooleanVar(value=False)
 
         self._build_layout()
 
@@ -190,8 +203,12 @@ class StellarClassifierApp:
             tab_spec,
             on_crossmatch=self._start_crossmatch,
             on_batch_analyse=self._start_batch_analyse,
+            on_prev_spectrum=self._show_previous_spectrum,
+            on_next_spectrum=self._show_next_spectrum,
+            on_focus_hr=self._focus_selected_spectrum_in_hr,
         )
         self.spectroscopy_panel.grid(row=0, column=0, sticky="nsew")
+        self.spectroscopy_panel.set_navigation_state(index=None, total=0, has_selection=False)
 
         self.status_bar = StatusBar(self.root)
         self.status_bar.grid(row=2, column=0, sticky="ew")
@@ -210,6 +227,164 @@ class StellarClassifierApp:
             mg_col = "M_G_bayesian"
         return teff_col, mg_col
 
+    def _get_crossmatched_source_ids(self) -> set[str]:
+        """Devuelve source_id de estrellas con espectro LAMOST."""
+        if self.df_crossmatch is None or self.df_crossmatch.empty:
+            return set()
+        return set(self.df_crossmatch["source_id"].astype(str).tolist())
+
+    def _get_hr_dataframe_for_plot(self) -> pd.DataFrame:
+        """Devuelve el DataFrame que se dibuja en HR segun filtros activos."""
+        if self.df_processed is None:
+            return pd.DataFrame()
+        if not self.hr_only_lamost_var.get():
+            return self.df_processed
+
+        source_ids = self._get_crossmatched_source_ids()
+        if not source_ids:
+            return self.df_processed.iloc[0:0].copy()
+        mask = self.df_processed["source_id"].astype(str).isin(source_ids)
+        return self.df_processed.loc[mask].copy()
+
+    def _update_spectrum_navigation_state(self) -> None:
+        """Sincroniza el estado de navegacion espectral en el panel."""
+        total = len(self._spectra_source_order)
+        if total == 0 or self._selected_spectrum_source_id is None:
+            self.spectroscopy_panel.set_navigation_state(index=None, total=total, has_selection=False)
+            return
+
+        try:
+            idx = self._spectra_source_order.index(str(self._selected_spectrum_source_id))
+        except ValueError:
+            idx = None
+        self.spectroscopy_panel.set_navigation_state(index=idx, total=total, has_selection=idx is not None)
+
+    def _show_spectrum_for_source(self, source_id: str, switch_to_spectro: bool = True) -> None:
+        """Carga y muestra el espectro de una estrella seleccionada por source_id."""
+        if self.df_crossmatch is None or self.df_crossmatch.empty:
+            self.spectroscopy_panel.set_status("error: primero busca espectros LAMOST")
+            return
+
+        source_str = str(source_id)
+        match = self.df_crossmatch.loc[self.df_crossmatch["source_id"].astype(str) == source_str]
+        if match.empty:
+            if switch_to_spectro:
+                self.notebook.select(1)
+            self.spectroscopy_panel.clear_spectrum()
+            self.spectroscopy_panel.set_status("la estrella seleccionada no tiene espectro LAMOST")
+            return
+
+        obs_row = match.iloc[0]
+        obsid = obs_row.get("obsid")
+        snrg = obs_row.get("snrg")
+        class_lamost = obs_row.get("class_lamost")
+        subclass_lamost = obs_row.get("subclass_lamost")
+
+        teff_phot = None
+        if self.df_processed is not None and not self.df_processed.empty:
+            row_src = self.df_processed.loc[self.df_processed["source_id"].astype(str) == source_str]
+            if not row_src.empty and "teff" in row_src.columns:
+                teff_raw = row_src.iloc[0].get("teff")
+                try:
+                    teff_phot = float(teff_raw)
+                except Exception:
+                    teff_phot = None
+
+        self._selected_spectrum_source_id = source_str
+        self._update_spectrum_navigation_state()
+
+        if switch_to_spectro:
+            self.notebook.select(1)
+        self.spectroscopy_panel.set_status("analizando espectro seleccionado...")
+
+        def worker() -> None:
+            from src.lamost import analyse_star_spectrum
+
+            result = analyse_star_spectrum(
+                source_id=source_str,
+                obsid=obsid,
+                teff_photometric=teff_phot,
+            )
+            result["snrg"] = snrg
+            result["class_lamost"] = class_lamost
+            result["subclass_lamost"] = subclass_lamost
+            self.root.after(0, lambda r=result: self.spectroscopy_panel.show_spectrum(r))
+            if result.get("success"):
+                self.root.after(0, lambda: self.spectroscopy_panel.set_status("espectro cargado"))
+            else:
+                self.root.after(0, lambda: self.spectroscopy_panel.set_status(f"error: {result.get('error') or 'sin detalle'}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_previous_spectrum(self) -> None:
+        """Muestra el espectro anterior de la lista de coincidencias."""
+        if not self._spectra_source_order:
+            self.spectroscopy_panel.set_status("error: no hay espectros para navegar")
+            return
+        if self._selected_spectrum_source_id not in self._spectra_source_order:
+            self._show_spectrum_for_source(self._spectra_source_order[0], switch_to_spectro=True)
+            return
+        idx = self._spectra_source_order.index(str(self._selected_spectrum_source_id))
+        if idx <= 0:
+            return
+        self._show_spectrum_for_source(self._spectra_source_order[idx - 1], switch_to_spectro=True)
+
+    def _show_next_spectrum(self) -> None:
+        """Muestra el espectro siguiente de la lista de coincidencias."""
+        if not self._spectra_source_order:
+            self.spectroscopy_panel.set_status("error: no hay espectros para navegar")
+            return
+        if self._selected_spectrum_source_id not in self._spectra_source_order:
+            self._show_spectrum_for_source(self._spectra_source_order[0], switch_to_spectro=True)
+            return
+        idx = self._spectra_source_order.index(str(self._selected_spectrum_source_id))
+        if idx >= len(self._spectra_source_order) - 1:
+            return
+        self._show_spectrum_for_source(self._spectra_source_order[idx + 1], switch_to_spectro=True)
+
+    def _focus_selected_spectrum_in_hr(self) -> None:
+        """Lleva la vista al HR y resalta la estrella del espectro seleccionado."""
+        if self._selected_spectrum_source_id is None:
+            self.spectroscopy_panel.set_status("error: no hay espectro seleccionado")
+            return
+        if self.df_processed is None or self.df_processed.empty:
+            self.spectroscopy_panel.set_status("error: primero procesa y grafica datos")
+            return
+        self.notebook.select(0)
+        self._highlight_source_in_hr(self._selected_spectrum_source_id)
+
+    def _highlight_source_in_hr(self, source_id: str) -> None:
+        """Marca visualmente una estrella en el diagrama HR."""
+        if self.df_processed is None or self.df_processed.empty:
+            return
+        if self.ax is None:
+            return
+
+        teff_col, mg_col = self._get_hr_columns()
+        row = self.df_processed.loc[self.df_processed["source_id"].astype(str) == str(source_id)]
+        if row.empty:
+            return
+        x = pd.to_numeric(row.iloc[0].get(teff_col), errors="coerce")
+        y = pd.to_numeric(row.iloc[0].get(mg_col), errors="coerce")
+        if not np.isfinite(x) or not np.isfinite(y):
+            return
+
+        try:
+            if self._hr_selected_marker is not None:
+                self._hr_selected_marker.remove()
+        except Exception:
+            pass
+        self._hr_selected_marker = self.ax.scatter(
+            [float(x)],
+            [float(y)],
+            s=180,
+            facecolors="none",
+            edgecolors="black",
+            linewidths=1.8,
+            zorder=12,
+        )
+        self.plot_panel.draw()
+
     def _rebuild_hr_kdtree(self) -> None:
         """Reconstruye el KDTree de HR para habilitar click cercano a estrellas."""
         self._hr_kdtree = None
@@ -217,16 +392,17 @@ class StellarClassifierApp:
         self._hr_kdtree_source_ids = None
         self._hr_kdtree_cols = None
 
-        if self.df_processed is None or self.df_processed.empty:
+        hr_df = self._get_hr_dataframe_for_plot()
+        if hr_df.empty:
             return
 
         teff_col, mg_col = self._get_hr_columns()
-        if teff_col not in self.df_processed.columns or mg_col not in self.df_processed.columns:
+        if teff_col not in hr_df.columns or mg_col not in hr_df.columns:
             return
 
-        x = pd.to_numeric(self.df_processed[teff_col], errors="coerce").to_numpy(dtype=float)
-        y = pd.to_numeric(self.df_processed[mg_col], errors="coerce").to_numpy(dtype=float)
-        sid = self.df_processed.get("source_id", pd.Series(np.arange(len(self.df_processed))))
+        x = pd.to_numeric(hr_df[teff_col], errors="coerce").to_numpy(dtype=float)
+        y = pd.to_numeric(hr_df[mg_col], errors="coerce").to_numpy(dtype=float)
+        sid = hr_df.get("source_id", pd.Series(np.arange(len(hr_df))))
         source_ids = sid.astype(str).to_numpy()
 
         mask = np.isfinite(x) & np.isfinite(y)
@@ -268,52 +444,11 @@ class StellarClassifierApp:
 
         click_norm = np.array([float(event.xdata), float(event.ydata)], dtype=float) / self._hr_kdtree_scale
         dist, idx = self._hr_kdtree.query(click_norm, k=1)
-        if not np.isfinite(dist) or dist > 0.05:
+        if not np.isfinite(dist) or dist > self.HR_CLICK_TOLERANCE:
             return
 
         source_id = str(self._hr_kdtree_source_ids[int(idx)])
-        match = self.df_crossmatch.loc[self.df_crossmatch["source_id"].astype(str) == source_id]
-        if match.empty:
-            self.notebook.select(1)
-            self.spectroscopy_panel.clear_spectrum()
-            self.spectroscopy_panel.set_status("la estrella seleccionada no tiene espectro LAMOST")
-            return
-
-        obs_row = match.iloc[0]
-        obsid = obs_row.get("obsid")
-        snrg = obs_row.get("snrg")
-        class_lamost = obs_row.get("class_lamost")
-        subclass_lamost = obs_row.get("subclass_lamost")
-        teff_phot = None
-        row_src = self.df_processed.loc[self.df_processed["source_id"].astype(str) == source_id]
-        if not row_src.empty and "teff" in row_src.columns:
-            teff_raw = row_src.iloc[0].get("teff")
-            try:
-                teff_phot = float(teff_raw)
-            except Exception:
-                teff_phot = None
-
-        self.notebook.select(1)
-        self.spectroscopy_panel.set_status("analizando espectro seleccionado...")
-
-        def worker() -> None:
-            from src.lamost import analyse_star_spectrum
-
-            result = analyse_star_spectrum(
-                source_id=source_id,
-                obsid=obsid,
-                teff_photometric=teff_phot,
-            )
-            result["snrg"] = snrg
-            result["class_lamost"] = class_lamost
-            result["subclass_lamost"] = subclass_lamost
-            self.root.after(0, lambda r=result: self.spectroscopy_panel.show_spectrum(r))
-            if result.get("success"):
-                self.root.after(0, lambda: self.spectroscopy_panel.set_status("espectro cargado"))
-            else:
-                self.root.after(0, lambda: self.spectroscopy_panel.set_status(f"error: {result.get('error') or 'sin detalle'}"))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._show_spectrum_for_source(source_id, switch_to_spectro=True)
 
     def _start_crossmatch(self) -> None:
         """Lanza el cross-match LAMOST en background."""
@@ -330,11 +465,17 @@ class StellarClassifierApp:
                 df_match = crossmatch_lamost(self.df_processed, radius_arcsec=2.0, max_stars=500)
                 self.df_crossmatch = df_match
                 n = len(df_match)
+                source_order = [str(v) for v in df_match.get("source_id", pd.Series(dtype=object)).astype(str).tolist()]
+                # Mantener orden y evitar duplicados para navegacion estable.
+                self._spectra_source_order = list(dict.fromkeys(source_order))
+                self._selected_spectrum_source_id = self._spectra_source_order[0] if self._spectra_source_order else None
                 self.root.after(0, lambda d=df_match: self.spectroscopy_panel.set_crossmatch_results(d))
+                self.root.after(0, self._update_spectrum_navigation_state)
                 self.root.after(0, lambda: self.spectroscopy_panel.set_status(
                     f"cross-match listo: {n} estrellas con espectro LAMOST"
                 ))
                 self.root.after(0, self._connect_hr_click)
+                self.root.after(0, self._refresh_hr_plot)
             except Exception as exc:
                 msg = str(exc)
                 self.root.after(0, lambda m=msg: self.spectroscopy_panel.set_status(f"error en cross-match: {m}"))
@@ -413,13 +554,21 @@ class StellarClassifierApp:
         )
         self.variables_check.grid(row=0, column=6, padx=(0, 12))
 
-        ttk.Label(action_bar, text="N:").grid(row=0, column=7, padx=(0, 4))
-        self.n_stars_entry = ttk.Entry(action_bar, textvariable=self.n_stars_var, width=8)
-        self.n_stars_entry.grid(row=0, column=8, padx=(0, 8))
+        self.hr_lamost_check = ttk.Checkbutton(
+            action_bar,
+            text="HR: solo con espectro",
+            variable=self.hr_only_lamost_var,
+            command=self._refresh_hr_plot,
+        )
+        self.hr_lamost_check.grid(row=0, column=7, padx=(0, 12))
 
-        ttk.Label(action_bar, text="Max pc:").grid(row=0, column=9, padx=(0, 4))
+        ttk.Label(action_bar, text="N:").grid(row=0, column=8, padx=(0, 4))
+        self.n_stars_entry = ttk.Entry(action_bar, textvariable=self.n_stars_var, width=8)
+        self.n_stars_entry.grid(row=0, column=9, padx=(0, 8))
+
+        ttk.Label(action_bar, text="Max pc:").grid(row=0, column=10, padx=(0, 4))
         self.max_dist_entry = ttk.Entry(action_bar, textvariable=self.max_dist_var, width=8)
-        self.max_dist_entry.grid(row=0, column=10)
+        self.max_dist_entry.grid(row=0, column=11)
 
     def _set_status(self, text: str) -> None:
         """Actualiza la barra inferior con un mensaje de estado."""
@@ -752,11 +901,15 @@ class StellarClassifierApp:
         self.stats = None
         self.df_crossmatch = None
         self.df_spectra_results = None
+        self._spectra_source_order = []
+        self._selected_spectrum_source_id = None
         self._hr_kdtree = None
         self._hr_kdtree_scale = None
         self._hr_kdtree_source_ids = None
+        self._hr_selected_marker = None
         if hasattr(self, "spectroscopy_panel"):
             self.spectroscopy_panel.set_crossmatch_results(pd.DataFrame())
+            self.spectroscopy_panel.set_navigation_state(index=None, total=0, has_selection=False)
             self.spectroscopy_panel.clear_spectrum()
             self.spectroscopy_panel.set_status("esperando cross-match LAMOST")
         self.stats_panel.clear()
@@ -932,6 +1085,12 @@ class StellarClassifierApp:
             self._set_status("error: primero procesa datos")
             return
 
+        df_plot = self._get_hr_dataframe_for_plot()
+        if df_plot.empty:
+            self.plot_panel.clear(message="No hay estrellas con espectro LAMOST para mostrar en HR")
+            self._set_status("sin estrellas con espectro LAMOST para el filtro activo")
+            return
+
         self._set_status("graficando diagrama HR...")
         try:
             self.fig.clf()
@@ -944,7 +1103,7 @@ class StellarClassifierApp:
             show_vars = self.variables_panel.get_show_variables()
             active_types = self.variables_panel.get_active_types() if show_vars else None
             plot_hr(
-                self.df_processed,
+                df_plot,
                 ax=self.ax,
                 use_corrected=self.extinction_var.get(),
                 use_bayesian=self.bayesian_var.get(),
@@ -952,7 +1111,30 @@ class StellarClassifierApp:
                 highlight_variables=show_vars,
                 variable_types_to_show=active_types if show_vars else None,
             )
-            self.plot_panel.set_point_context(self.df_processed, getattr(self.fig, "_hr_scatter", None))
+
+            # Marcar estrellas con espectro para facilitar seleccion visual en HR.
+            if self.df_crossmatch is not None and not self.df_crossmatch.empty:
+                teff_col, mg_col = self._get_hr_columns()
+                ids_with_spec = self._get_crossmatched_source_ids()
+                mask_spec = df_plot["source_id"].astype(str).isin(ids_with_spec)
+                if mask_spec.any() and teff_col in df_plot.columns and mg_col in df_plot.columns:
+                    x_spec = pd.to_numeric(df_plot.loc[mask_spec, teff_col], errors="coerce").to_numpy(dtype=float)
+                    y_spec = pd.to_numeric(df_plot.loc[mask_spec, mg_col], errors="coerce").to_numpy(dtype=float)
+                    valid = np.isfinite(x_spec) & np.isfinite(y_spec)
+                    if valid.any():
+                        self.ax.scatter(
+                            x_spec[valid],
+                            y_spec[valid],
+                            s=36,
+                            facecolors="none",
+                            edgecolors="gold",
+                            linewidths=1.0,
+                            alpha=0.9,
+                            zorder=9,
+                            label="Con espectro LAMOST",
+                        )
+
+            self.plot_panel.set_point_context(df_plot, getattr(self.fig, "_hr_scatter", None))
             modes = []
             if self.extinction_var.get():
                 modes.append("extinción corregida")
@@ -960,12 +1142,16 @@ class StellarClassifierApp:
                 modes.append("bayesiano")
             if show_vars:
                 modes.append("variables")
+            if self.hr_only_lamost_var.get():
+                modes.append("solo LAMOST")
             mode = " + ".join(modes) if modes else "bruto"
             self.plot_panel.set_display_mode(mode)
             self.plot_panel.capture_view_limits()
             self.plot_panel.draw()
             if self.df_crossmatch is not None and not self.df_crossmatch.empty:
                 self._connect_hr_click()
+            if self._selected_spectrum_source_id is not None:
+                self._highlight_source_in_hr(self._selected_spectrum_source_id)
             if hasattr(self.plot_panel, "toolbar") and self.plot_panel.toolbar is not None:
                 self.plot_panel.toolbar.update()
             self._set_status("grafica lista")

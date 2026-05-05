@@ -96,24 +96,30 @@ def test_spectral_type_from_ew_nan_returns_unknown() -> None:
 # Tests de teff_from_ew_h_alpha
 # ---------------------------------------------------------------------
 
-def test_teff_from_ew_h_alpha_solar_range() -> None:
-    """W_Halpha ~ 2 A para tipo G -> T_eff en rango solar aproximado."""
-    teff = teff_from_ew_h_alpha(2.0)
+def test_teff_from_ew_h_alpha_solar_value() -> None:
+    """W_Halpha ~ 3 A (G2V solar) debe dar T_eff cercano al solar."""
+    teff = teff_from_ew_h_alpha(3.0)
     assert np.isfinite(teff)
-    assert 9000 < teff < 11000
+    assert 5000 < teff < 6500
 
 
-def test_teff_from_ew_h_alpha_decreasing() -> None:
-    """T_eff debe decrecer al aumentar W_Halpha (rango FGK)."""
-    t1 = teff_from_ew_h_alpha(1.0)
-    t2 = teff_from_ew_h_alpha(3.0)
-    t3 = teff_from_ew_h_alpha(7.0)
-    assert t1 > t2 > t3
+def test_teff_from_ew_h_alpha_increasing() -> None:
+    """T_eff crece con W_Halpha en el lado frio (FGK)."""
+    t_k = teff_from_ew_h_alpha(1.0)
+    t_g = teff_from_ew_h_alpha(3.0)
+    t_f = teff_from_ew_h_alpha(7.0)
+    t_a = teff_from_ew_h_alpha(11.0)
+    assert t_k < t_g < t_f < t_a
+    assert 4000 < t_k < 5500
+    assert 5000 < t_g < 6500
+    assert 6500 < t_f < 8000
+    assert 8500 < t_a < 10500
 
 
 def test_teff_from_ew_h_alpha_out_of_range() -> None:
-    """W_Halpha negativo o NaN debe devolver NaN."""
+    """W fuera de rango debe devolver NaN."""
     assert np.isnan(teff_from_ew_h_alpha(-1.0))
+    assert np.isnan(teff_from_ew_h_alpha(15.0))
     assert np.isnan(teff_from_ew_h_alpha(float("nan")))
 
 
@@ -166,6 +172,34 @@ def test_load_spectrum_from_cache_reads_existing_fits(tmp_path) -> None:
     loaded_wave, loaded_flux = result
     assert len(loaded_wave) == len(wavelength)
     assert np.all(np.isfinite(loaded_wave))
+    assert np.all(np.isfinite(loaded_flux))
+
+
+def test_load_spectrum_from_cache_reads_lamost_bintable_format(tmp_path) -> None:
+    """Valida el parser sobre un FITS con estructura BinTable real de LAMOST."""
+    wave, flux = _make_synthetic_spectrum(teff=5800.0)
+    log_wave = np.log10(wave).astype(np.float32)
+    flux_f = flux.astype(np.float32)
+
+    col_flux = fits.Column(
+        name="FLUX", format=f"{len(flux_f)}E", array=np.array([flux_f]),
+    )
+    col_wave = fits.Column(
+        name="WAVELENGTH", format=f"{len(log_wave)}E", array=np.array([log_wave]),
+    )
+    hdu_primary = fits.PrimaryHDU()
+    hdu_table = fits.BinTableHDU.from_columns([col_flux, col_wave])
+    hdul = fits.HDUList([hdu_primary, hdu_table])
+
+    fits_path = tmp_path / "spec_77.fits"
+    hdul.writeto(fits_path, overwrite=True)
+
+    result = load_spectrum_from_cache(77, cache_dir=tmp_path)
+    assert result is not None
+    loaded_wave, loaded_flux = result
+    assert len(loaded_wave) == len(wave)
+    assert np.all(np.isfinite(loaded_wave))
+    assert 3000 < float(np.nanmin(loaded_wave)) < 8000
     assert np.all(np.isfinite(loaded_flux))
 
 

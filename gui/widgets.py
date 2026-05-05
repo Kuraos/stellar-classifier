@@ -12,18 +12,18 @@ import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+from src.lamost import SPECTRAL_LINES as SPECTRAL_LINES_GUI
 from src.variables import VARIABLE_LABELS
 
 
-SPECTRAL_LINES_GUI: dict[str, float] = {
-    "H_alpha": 6562.8,
-    "H_beta": 4861.3,
-    "H_gamma": 4340.5,
-    "Ca_II_K": 3933.7,
-    "Ca_II_H": 3968.5,
-    "Mg_I_b": 5183.6,
-    "Na_I_D": 5895.9,
-}
+def _safe_isfinite(value: object) -> bool:
+    """Devuelve True solo para floats finitos; tolera None y strings."""
+    if value is None:
+        return False
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
 
 
 class StatisticsPanel(ttk.LabelFrame):
@@ -388,10 +388,16 @@ class SpectroscopyPanel(ttk.Frame):
         master: tk.Misc,
         on_crossmatch: Callable[[], None],
         on_batch_analyse: Callable[[], None],
+        on_prev_spectrum: Callable[[], None] | None = None,
+        on_next_spectrum: Callable[[], None] | None = None,
+        on_focus_hr: Callable[[], None] | None = None,
     ):
         super().__init__(master)
         self.on_crossmatch = on_crossmatch
         self.on_batch_analyse = on_batch_analyse
+        self.on_prev_spectrum = on_prev_spectrum
+        self.on_next_spectrum = on_next_spectrum
+        self.on_focus_hr = on_focus_hr
         self._crossmatch_df: pd.DataFrame | None = None
 
         self.columnconfigure(0, weight=3)
@@ -456,8 +462,20 @@ class SpectroscopyPanel(ttk.Frame):
         self.btn_batch = ttk.Button(bottom, text="Analizar muestra", command=self.on_batch_analyse)
         self.btn_batch.grid(row=0, column=1, padx=(0, 12), pady=4)
 
+        self.btn_prev = ttk.Button(bottom, text="Anterior", command=self._handle_prev, state="disabled")
+        self.btn_prev.grid(row=0, column=2, padx=(0, 6), pady=4)
+
+        self.btn_next = ttk.Button(bottom, text="Siguiente", command=self._handle_next, state="disabled")
+        self.btn_next.grid(row=0, column=3, padx=(0, 6), pady=4)
+
+        self.btn_focus_hr = ttk.Button(bottom, text="Ir a estrella en HR", command=self._handle_focus_hr, state="disabled")
+        self.btn_focus_hr.grid(row=0, column=4, padx=(0, 10), pady=4)
+
+        self.nav_var = tk.StringVar(value="Espectros: 0/0")
+        ttk.Label(bottom, textvariable=self.nav_var).grid(row=0, column=5, sticky="w", padx=(0, 12))
+
         self.status_var = tk.StringVar(value="Estado: listo")
-        ttk.Label(bottom, textvariable=self.status_var).grid(row=0, column=2, sticky="w")
+        ttk.Label(bottom, textvariable=self.status_var).grid(row=0, column=6, sticky="w")
 
         self.clear_spectrum()
 
@@ -468,6 +486,21 @@ class SpectroscopyPanel(ttk.Frame):
     def set_crossmatch_results(self, df: pd.DataFrame) -> None:
         """Guarda internamente resultados de cross-match."""
         self._crossmatch_df = df.copy() if df is not None else None
+
+    def set_navigation_state(self, index: int | None, total: int, has_selection: bool) -> None:
+        """Actualiza controles de navegacion para recorrer espectros."""
+        if total <= 0 or index is None:
+            self.nav_var.set("Espectros: 0/0")
+            self.btn_prev.configure(state="disabled")
+            self.btn_next.configure(state="disabled")
+            self.btn_focus_hr.configure(state="disabled")
+            return
+
+        idx = int(index)
+        self.nav_var.set(f"Espectros: {idx + 1}/{int(total)}")
+        self.btn_prev.configure(state="normal" if idx > 0 else "disabled")
+        self.btn_next.configure(state="normal" if idx < int(total) - 1 else "disabled")
+        self.btn_focus_hr.configure(state="normal" if has_selection else "disabled")
 
     def get_crossmatch_df(self) -> pd.DataFrame | None:
         """Devuelve el DataFrame de cross-match almacenado."""
@@ -496,6 +529,18 @@ class SpectroscopyPanel(ttk.Frame):
         self.obsid_var.set("LAMOST obsid: -")
         self.snr_var.set("S/N (G band): -")
         self.class_var.set("Clase LAMOST: -")
+
+    def _handle_prev(self) -> None:
+        if callable(self.on_prev_spectrum):
+            self.on_prev_spectrum()
+
+    def _handle_next(self) -> None:
+        if callable(self.on_next_spectrum):
+            self.on_next_spectrum()
+
+    def _handle_focus_hr(self) -> None:
+        if callable(self.on_focus_hr):
+            self.on_focus_hr()
 
     def show_spectrum(self, result: dict) -> None:
         """Dibuja espectro, llena tabla EW y actualiza resumen textual."""
@@ -530,10 +575,10 @@ class SpectroscopyPanel(ttk.Frame):
 
         self.lines_tree.delete(*self.lines_tree.get_children())
         for name, wl in SPECTRAL_LINES_GUI.items():
-            item = ew_dict.get(name, {})
+            item = ew_dict.get(name) or {}
             ew = item.get("EW", np.nan)
             fitted = bool(item.get("fitted", False))
-            ew_str = f"{float(ew):.3f}" if np.isfinite(ew) else "NaN"
+            ew_str = f"{float(ew):.3f}" if _safe_isfinite(ew) else "NaN"
             self.lines_tree.insert(
                 "",
                 tk.END,
@@ -547,12 +592,12 @@ class SpectroscopyPanel(ttk.Frame):
         teff_diff_pct = result.get("teff_diff_pct")
 
         self.type_var.set(f"Tipo espectral (EW): {spt}")
-        if teff_spec is not None and np.isfinite(teff_spec):
+        if _safe_isfinite(teff_spec):
             self.teff_spec_var.set(f"T_eff espectrosc.: {float(teff_spec):.0f} K")
         else:
             self.teff_spec_var.set("T_eff espectrosc.: NaN")
 
-        if teff_phot is not None and np.isfinite(float(teff_phot)):
+        if _safe_isfinite(teff_phot):
             self.teff_phot_var.set(f"T_eff fotometrica: {float(teff_phot):.0f} K")
         else:
             self.teff_phot_var.set("T_eff fotometrica: -")
@@ -566,7 +611,7 @@ class SpectroscopyPanel(ttk.Frame):
         self.obsid_var.set(f"LAMOST obsid: {obsid}")
 
         snrg = result.get("snrg", np.nan)
-        if snrg is not None and np.isfinite(float(snrg)):
+        if _safe_isfinite(snrg):
             self.snr_var.set(f"S/N (G band): {float(snrg):.1f}")
         else:
             self.snr_var.set("S/N (G band): -")
