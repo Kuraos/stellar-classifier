@@ -6,26 +6,30 @@ segun la temperatura efectiva.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional, TYPE_CHECKING, cast
 
 import matplotlib.pyplot as plt
 import pandas as pd
 
+if TYPE_CHECKING:
+    import matplotlib.figure
+    import matplotlib.axes
+
 from src.isochrones import filter_evolutionary_phases, isochrone_to_observables
 from src.variables import VARIABLE_LABELS, VARIABLE_PLOT_STYLE
 
-SPECTRAL_BOUNDS = [30000, 10000, 7500, 6000, 5200, 3700]
+SPECTRAL_BOUNDS: list[int] = [30000, 10000, 7500, 6000, 5200, 3700]
 
 
 def plot_hr(
     df: pd.DataFrame,
-    ax: Optional[plt.Axes] = None,
+    ax: Optional["matplotlib.axes.Axes"] = None,
     use_corrected: bool = False,
     use_bayesian: bool = False,
-    isochrones_to_overlay: list[dict] | None = None,
+    isochrones_to_overlay: list[dict[str, object]] | None = None,
     highlight_variables: bool = False,
     variable_types_to_show: set[str] | None = None,
-) -> plt.Figure:
+) -> "matplotlib.figure.Figure":
     """Dibuja un diagrama HR usando T_eff y M_G.
 
     Si se pasa ax, dibuja sobre ese eje para permitir embebido en Tkinter y
@@ -39,10 +43,11 @@ def plot_hr(
     if ax is None:
         fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
     else:
-        fig = ax.figure
+        fig = cast("matplotlib.figure.Figure", ax.figure)
         ax.clear()
 
-    previous_colorbar = getattr(fig, "_hr_colorbar", None)
+    fig_state = cast(Any, fig)
+    previous_colorbar = getattr(fig_state, "_hr_colorbar", None)
     if previous_colorbar is not None:
         try:
             previous_colorbar.ax.remove()
@@ -51,7 +56,7 @@ def plot_hr(
                 previous_colorbar.remove()
             except Exception:
                 pass
-        fig._hr_colorbar = None
+        fig_state._hr_colorbar = None
 
     # Seleccionar columnas activas según los toggles disponibles.
     teff_col = "teff"
@@ -108,13 +113,37 @@ def plot_hr(
                 if subset.empty:
                     continue
 
+                marker = str(style.get("marker", "o"))
+                color = str(style.get("color", "gray"))
+                size_raw = style.get("size", 40.0)
+                if isinstance(size_raw, (int, float)):
+                    size = float(size_raw)
+                elif isinstance(size_raw, str):
+                    try:
+                        size = float(size_raw)
+                    except Exception:
+                        size = 40.0
+                else:
+                    size = 40.0
+
+                zorder_raw = style.get("zorder", 5)
+                if isinstance(zorder_raw, (int, float)):
+                    zorder = int(zorder_raw)
+                elif isinstance(zorder_raw, str):
+                    try:
+                        zorder = int(zorder_raw)
+                    except Exception:
+                        zorder = 5
+                else:
+                    zorder = 5
+
                 ax.scatter(
                     subset[teff_col],
                     subset[mg_col],
-                    marker=style["marker"],
-                    color=style["color"],
-                    s=style["size"],
-                    zorder=style["zorder"],
+                    marker=marker,
+                    color=color,
+                    s=size,
+                    zorder=zorder,
                     linewidths=0.5,
                     label=VARIABLE_LABELS.get(variable_type, variable_type),
                 )
@@ -145,7 +174,7 @@ def plot_hr(
             picker=5,
         )
 
-    fig._hr_scatter = scatter
+    fig_state._hr_scatter = scatter
 
     for bound in SPECTRAL_BOUNDS:
         ax.axvline(bound, color="gray", linestyle=":", linewidth=0.8)
@@ -160,7 +189,7 @@ def plot_hr(
             iso = overlay.get("isochrone")
             if iso is None or not isinstance(iso, pd.DataFrame) or iso.empty:
                 continue
-            color = overlay.get("color", "tab:red")
+            color = str(overlay.get("color", "tab:red"))
             label = overlay.get("label", f"log_age={overlay.get('log_age', '?')}")
 
             filtered = filter_evolutionary_phases(iso)
@@ -203,7 +232,7 @@ def plot_hr(
 
     colorbar = fig.colorbar(scatter, ax=ax)
     colorbar.set_label("T_eff [K]")
-    fig._hr_colorbar = colorbar
+    fig_state._hr_colorbar = colorbar
 
     fig.tight_layout()
     return fig

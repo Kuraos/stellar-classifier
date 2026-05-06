@@ -11,7 +11,7 @@ absultas y errores asimetricos.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import cast
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -72,7 +72,7 @@ def best_distance_bayesian(
 
 def distance_uncertainty_asymmetric(
     r_lo: ArrayLike, r_med: ArrayLike, r_hi: ArrayLike
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Devuelve (sigma_lower, sigma_upper) en parsec.
 
     sigma_lower = r_med - r_lo
@@ -127,4 +127,4 @@ def absolute_magnitude_bayesian(g_mag: ArrayLike, distance_pc: ArrayLike) -> np.
 
     m_abs[~np.isfinite(m_abs)] = np.nan
     m_abs[d <= 0] = np.nan
-    return m_abs
+    return cast(np.ndarray, m_abs)

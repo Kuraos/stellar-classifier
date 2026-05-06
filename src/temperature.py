@@ -6,7 +6,7 @@ Este modulo implementa relaciones empiricas para pasar de fotometria Gaia
 
 from __future__ import annotations
 
-from typing import Union
+from typing import Union, overload
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -82,6 +82,10 @@ def luminosity_solar(m_abs: ArrayLike, m_sun: float = 4.74) -> np.ndarray:
     return lum
 
 
+@overload
+def spectral_type(teff: float) -> str: ...
+@overload
+def spectral_type(teff: np.ndarray) -> np.ndarray: ...
 def spectral_type(teff: Union[float, ArrayLike]) -> Union[str, np.ndarray]:
     """Asigna tipo espectral de Harvard a partir de T_eff.
 

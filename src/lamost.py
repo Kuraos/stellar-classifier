@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 import gzip
 import re
+from typing import cast
 import warnings
 
 import numpy as np
@@ -53,7 +54,7 @@ LINE_WINDOWS: dict[str, float] = {
     "Na_I_D": 8.0,
 }
 
-SPECTRA_CACHE_DIR = Path("data/spectra")
+SPECTRA_CACHE_DIR: Path = Path("data/spectra")
 
 _OBSID_VALID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -102,9 +103,21 @@ def _pick_column(row: pd.Series, candidates: list[str]) -> object:
 def _table_to_dataframe(table: Table) -> pd.DataFrame:
     """Convierte tabla astropy a pandas minimizando efectos de masked arrays."""
     try:
-        return table.filled(np.nan).to_pandas()
+        return cast(pd.DataFrame, table.filled(np.nan).to_pandas())
     except Exception:
-        return table.to_pandas()
+        return cast(pd.DataFrame, table.to_pandas())
+
+
+def _to_float(value: object, default: float = np.nan) -> float:
+    """Convierte valores heterogeneos a float evitando errores de tipado."""
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except Exception:
+            return default
+    return default
 
 
 def crossmatch_lamost(
@@ -293,7 +306,7 @@ def _normalize_flux(flux: np.ndarray) -> np.ndarray:
     if not np.isfinite(scale) or scale == 0:
         scale = 1.0
 
-    return y / scale
+    return cast(np.ndarray, y / scale)
 
 
 def _read_lamost_fits(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
@@ -481,7 +494,7 @@ def measure_equivalent_widths(
     flux: np.ndarray,
     lines: dict[str, float] | None = None,
     windows: dict[str, float] | None = None,
-) -> dict[str, dict]:
+) -> dict[str, dict[str, object]]:
     """Mide anchos equivalentes de las lineas espectrales diagnosticas.
 
     Usa fit_absorption_line de src/line_fitting.py para cada linea.
@@ -511,7 +524,7 @@ def measure_equivalent_widths(
 
     x = np.asarray(wavelength, dtype=float)
     y = np.asarray(flux, dtype=float)
-    results: dict[str, dict] = {}
+    results: dict[str, dict[str, object]] = {}
 
     if x.size == 0 or y.size == 0:
         for name in line_map:
@@ -530,7 +543,7 @@ def measure_equivalent_widths(
 
     for line_name, center in line_map.items():
         window = float(window_map.get(line_name, 10.0))
-        base = {
+        base: dict[str, object] = {
             "EW": np.nan,
             "EW_err": np.nan,
             "center": np.nan,
@@ -545,11 +558,11 @@ def measure_equivalent_widths(
 
         try:
             fit = fit_absorption_line(x, y, center_guess=center, window=window)
-            ew = float(fit.get("equivalent_width", np.nan))
+            ew = _to_float(fit.get("equivalent_width", np.nan))
             perr = fit.get("parameter_errors", {})
-            sigma_err = float(perr.get("sigma", np.nan)) if isinstance(perr, dict) else np.nan
-            depth = float(fit.get("depth", np.nan))
-            continuum = float(fit.get("continuum", np.nan))
+            sigma_err = _to_float(perr.get("sigma", np.nan)) if isinstance(perr, dict) else np.nan
+            depth = _to_float(fit.get("depth", np.nan))
+            continuum = _to_float(fit.get("continuum", np.nan))
             if np.isfinite(depth) and np.isfinite(sigma_err) and np.isfinite(continuum):
                 ew_err = abs(np.sqrt(2.0 * np.pi) * depth * sigma_err)
             else:
@@ -558,9 +571,9 @@ def measure_equivalent_widths(
             results[line_name] = {
                 "EW": ew,
                 "EW_err": ew_err,
-                "center": float(fit.get("center", np.nan)),
+                "center": _to_float(fit.get("center", np.nan)),
                 "depth": depth,
-                "fwhm": float(fit.get("fwhm", np.nan)),
+                "fwhm": _to_float(fit.get("fwhm", np.nan)),
                 "fitted": bool(np.isfinite(ew)),
             }
         except Exception:
@@ -664,7 +677,7 @@ def analyse_star_spectrum(
     obsid: int | str,
     cache_dir: str | Path = SPECTRA_CACHE_DIR,
     teff_photometric: float | None = None,
-) -> dict:
+) -> dict[str, object]:
     """Pipeline completo de analisis espectral para una estrella.
 
     Pasos:
@@ -679,7 +692,7 @@ def analyse_star_spectrum(
     Si la descarga o el ajuste fallan, success=False y error describe el motivo.
     Nunca lanza excepcion; maneja todos los errores internamente.
     """
-    base = {
+    base: dict[str, object] = {
         "source_id": source_id,
         "obsid": obsid,
         "wavelength": np.array([], dtype=float),
@@ -702,8 +715,8 @@ def analyse_star_spectrum(
 
         wavelength, flux = spectrum
         ew = measure_equivalent_widths(wavelength, flux)
-        ew_h_alpha = float(ew.get("H_alpha", {}).get("EW", np.nan))
-        ew_ca_k = float(ew.get("Ca_II_K", {}).get("EW", np.nan))
+        ew_h_alpha = _to_float((ew.get("H_alpha") or {}).get("EW", np.nan))
+        ew_ca_k = _to_float((ew.get("Ca_II_K") or {}).get("EW", np.nan))
 
         spectral_type_spec = spectral_type_from_ew(ew_h_alpha, ew_ca_k=ew_ca_k)
         teff_spec = teff_from_ew_h_alpha(ew_h_alpha)
@@ -742,7 +755,7 @@ def analyse_star_spectrum(
         return base
 
 
-def _pick_teff_photometric(df_processed: pd.DataFrame, source_id: object) -> float | None:
+def _pick_teff_photometric(df_processed: pd.DataFrame, source_id: int | str | None) -> float | None:
     """Recupera T_eff fotometrica para un source_id dado."""
     if df_processed is None or df_processed.empty or "source_id" not in df_processed.columns:
         return None
@@ -754,12 +767,9 @@ def _pick_teff_photometric(df_processed: pd.DataFrame, source_id: object) -> flo
     for col in ["teff", "teff_corr"]:
         if col in row.columns:
             value = row.iloc[0].get(col)
-            try:
-                val = float(value)
-                if np.isfinite(val):
-                    return val
-            except Exception:
-                continue
+            val = _to_float(value)
+            if np.isfinite(val):
+                return val
     return None
 
 
@@ -808,8 +818,10 @@ def batch_analyse_spectra(
 
     rows: list[dict[str, object]] = []
     for idx, (_, item) in enumerate(subset.iterrows(), start=1):
-        source_id = item.get("source_id")
-        obsid = item.get("obsid")
+        source_id_raw = item.get("source_id")
+        obsid_raw = item.get("obsid")
+        source_id: int | str = source_id_raw if isinstance(source_id_raw, (int, str)) else str(source_id_raw)
+        obsid: int | str = obsid_raw if isinstance(obsid_raw, (int, str)) else str(obsid_raw)
         teff_phot = _pick_teff_photometric(df_processed, source_id)
 
         result = analyse_star_spectrum(
@@ -819,7 +831,8 @@ def batch_analyse_spectra(
             teff_photometric=teff_phot,
         )
 
-        ew = result.get("equivalent_widths", {}) if isinstance(result, dict) else {}
+        ew_raw = result.get("equivalent_widths", {}) if isinstance(result, dict) else {}
+        ew: dict[str, dict[str, object]] = ew_raw if isinstance(ew_raw, dict) else {}
         rows.append(
             {
                 "source_id": source_id,
@@ -829,10 +842,10 @@ def batch_analyse_spectra(
                 "teff_photometric": result.get("teff_photometric"),
                 "teff_diff_K": result.get("teff_diff_K"),
                 "teff_diff_pct": result.get("teff_diff_pct"),
-                "EW_H_alpha": (ew.get("H_alpha") or {}).get("EW", np.nan),
-                "EW_H_beta": (ew.get("H_beta") or {}).get("EW", np.nan),
-                "EW_Ca_II_K": (ew.get("Ca_II_K") or {}).get("EW", np.nan),
-                "EW_Mg_I_b": (ew.get("Mg_I_b") or {}).get("EW", np.nan),
+                "EW_H_alpha": _to_float((ew.get("H_alpha") or {}).get("EW", np.nan)),
+                "EW_H_beta": _to_float((ew.get("H_beta") or {}).get("EW", np.nan)),
+                "EW_Ca_II_K": _to_float((ew.get("Ca_II_K") or {}).get("EW", np.nan)),
+                "EW_Mg_I_b": _to_float((ew.get("Mg_I_b") or {}).get("EW", np.nan)),
                 "success": bool(result.get("success", False)),
             }
         )

@@ -7,6 +7,11 @@ from tkinter import messagebox, ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from collections.abc import Callable
+from typing import Any, TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    import matplotlib.axes
 import pandas as pd
 
 
@@ -19,7 +24,7 @@ class MatplotlibPanel(ttk.Frame):
         self.figure = Figure(figsize=(width, height), dpi=dpi)
         self.ax = self.figure.add_subplot(111)
         self.current_df: pd.DataFrame | None = None
-        self.current_scatter = None
+        self.current_scatter: object | None = None
         self._view_limits: tuple[tuple[float, float], tuple[float, float]] | None = None
         self.mode_var = tk.StringVar(value="Modo: bruto")
 
@@ -41,11 +46,11 @@ class MatplotlibPanel(ttk.Frame):
 
         self.canvas.mpl_connect("pick_event", self._on_pick_event)
         # Callback invoked when a point is selected: receives a dict with row data
-        self.on_point_selected = None
+        self.on_point_selected: Callable[[dict[str, object]], None] | None = None
 
         self.clear(message="Presiona 'Graficar' para mostrar el diagrama HR")
 
-    def update_ax(self, new_ax: plt.Axes) -> None:
+    def update_ax(self, new_ax: "matplotlib.axes.Axes") -> None:
         """Actualiza la referencia al eje tras un redibujo completo."""
         self.ax = new_ax
 
@@ -67,7 +72,7 @@ class MatplotlibPanel(ttk.Frame):
             self.ax.set_axis_off()
         self.canvas.draw_idle()
 
-    def set_point_context(self, df: pd.DataFrame | None, scatter=None) -> None:
+    def set_point_context(self, df: pd.DataFrame | None, scatter: object = None) -> None:
         """Asocia el DataFrame y el scatter actual para inspeccion por clic."""
         self.current_df = df
         self.current_scatter = scatter
@@ -113,13 +118,14 @@ class MatplotlibPanel(ttk.Frame):
                 lines.append(f"{label}: {value}")
         return "\n".join(lines) if lines else "No hay datos disponibles para este punto."
 
-    def _on_pick_event(self, event) -> None:
+    def _on_pick_event(self, event: object) -> None:
         """Muestra un detalle breve al hacer clic sobre un punto del HR."""
         if self.current_df is None or self.current_scatter is None:
             return
-        if event.artist is not self.current_scatter:
+        event_any = cast(Any, event)
+        if event_any.artist is not self.current_scatter:
             return
-        indices = getattr(event, "ind", None)
+        indices = getattr(event_any, "ind", None)
         if not indices:
             return
 
@@ -136,7 +142,7 @@ class MatplotlibPanel(ttk.Frame):
             if callable(self.on_point_selected):
                 try:
                     # pass a plain dict for easier consumption
-                    self.on_point_selected(row.to_dict())
+                    self.on_point_selected(cast(dict[str, object], row.to_dict()))
                 except Exception:
                     pass
 

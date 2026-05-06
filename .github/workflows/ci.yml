@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Tests y verificación estática
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Instalar dependencias del sistema para Tkinter
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb
+
+      - name: Instalar dependencias del proyecto
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Linting con ruff
+        run: |
+          pip install ruff
+          ruff check src/ data/ gui/ main.py --select E,W,F --ignore E501
+
+      - name: Verificación de tipos con mypy
+        run: |
+          mypy src/ data/ main.py
+        continue-on-error: false
+
+      - name: Tests unitarios con pytest
+        env:
+          DISPLAY: ":99"
+        run: |
+          Xvfb :99 -screen 0 1024x768x24 &
+          sleep 1
+          pytest -q --ignore=tests/test_gui.py -m "not online"
+
+      - name: Tests de GUI con Xvfb
+        env:
+          DISPLAY: ":99"
+        run: |
+          pytest -q tests/test_gui.py -m "not online"
+        continue-on-error: true
+
+  coverage:
+    name: Cobertura de tests
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install pytest-cov
+
+      - name: Generar reporte de cobertura
+        env:
+          DISPLAY: ":99"
+        run: |
+          Xvfb :99 -screen 0 1024x768x24 &
+          sleep 1
+          pytest -q -m "not online" \
+            --cov=src --cov=data \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=60
+
+      - name: Subir reporte XML de cobertura
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 14

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from collections.abc import Callable
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -30,7 +31,7 @@ EBR_PER_AV = 0.415
 
 
 @lru_cache(maxsize=1)
-def _get_bayestar_query():
+def _get_bayestar_query() -> object:
     """Construye y reutiliza una instancia de BayestarQuery.
 
     Cargar Bayestar2019 desde disco es costoso, así que se cachea para evitar
@@ -93,7 +94,8 @@ def _query_bayestar_reddening(coords: SkyCoord) -> np.ndarray:
             "La correccion de extincion requiere instalar dustmaps."
         ) from exc
     try:
-        reddening = query(coords, mode="median")
+        query_fn = cast(Callable[..., ArrayLike], query)
+        reddening = query_fn(coords, mode="median")
     except Exception as exc:  # pragma: no cover - depende del mapa local
         raise RuntimeError("No fue posible consultar Bayestar19.") from exc
 
@@ -149,7 +151,8 @@ def apply_extinction_correction(
 
     coords = _build_galactic_coordinates(output, distance_col=distance_col)
     query = reddening_query or _query_bayestar_reddening
-    reddening_ebv = _broadcast_to_length(query(coords), len(output))
+    query_fn = cast(Callable[[SkyCoord], ArrayLike], query)
+    reddening_ebv = _broadcast_to_length(query_fn(coords), len(output))
 
     a_v = RV_DEFAULT * reddening_ebv
     a_g = AG_PER_AV * a_v

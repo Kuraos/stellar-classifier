@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Dict
-
 import numpy as np
 import pandas as pd
 
 SPECTRAL_ORDER = ["O", "B", "A", "F", "G", "K", "M"]
 
 
-def _nan_summary(values: pd.Series) -> Dict[str, float]:
+def _nan_summary(values: pd.Series) -> dict[str, float]:
     """Resume una serie numérica ignorando valores no finitos."""
     arr = values.to_numpy(dtype=float)
     return {
@@ -20,7 +18,7 @@ def _nan_summary(values: pd.Series) -> Dict[str, float]:
     }
 
 
-def compute_statistics(df: pd.DataFrame) -> dict:
+def compute_statistics(df: pd.DataFrame) -> dict[str, object]:
     """Calcula metricas globales que se muestran en paneles de la GUI.
 
     Espera un DataFrame procesado con al menos estas columnas:
@@ -95,8 +93,8 @@ def compute_statistics(df: pd.DataFrame) -> dict:
         types = (
             df["variable_type"].astype(str).fillna("OTHER").to_list()
         )
-        unique, counts = np.unique(types, return_counts=True)
-        counts_map = {k: int(v) for k, v in zip(unique.tolist(), counts.tolist())}
+        unique_values, unique_counts = np.unique(types, return_counts=True)
+        counts_map = {k: int(v) for k, v in zip(unique_values.tolist(), unique_counts.tolist())}
         NON_VARIABLE_LABELS = {"non_variable", "nan", "none", "OTHER", ""}
         n_vars = int(sum(
             v for k, v in counts_map.items()

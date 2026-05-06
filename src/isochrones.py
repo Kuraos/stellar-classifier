@@ -138,7 +138,7 @@ def parse_isochrone_file(filepath: str) -> pd.DataFrame:
 
 def list_available_isochrones(
     isochrones_dir: str = DEFAULT_ISOCHRONES_DIR,
-) -> list[dict]:
+) -> list[dict[str, object]]:
     """Lista todas las isócronas disponibles en el directorio.
 
     Devuelve una lista de diccionarios con:
@@ -225,7 +225,7 @@ def load_isochrone(
         ).reset_index(drop=True)
 
     available = list_available_isochrones(isochrones_dir)
-    available_labels = ", ".join(item["label_humano"] for item in available) or "sin archivos disponibles"
+    available_labels = ", ".join(str(item["label_humano"]) for item in available) or "sin archivos disponibles"
     raise FileNotFoundError(
         f"No se encontró una isócrona para log_age={log_age:.2f}, [M/H]={metallicity:.1f}. "
         f"Disponibles: {available_labels}"
@@ -384,7 +384,7 @@ def fit_best_age(
     use_corrected: bool = False,
     use_bayesian: bool = False,
     isochrones_dir: str = DEFAULT_ISOCHRONES_DIR,
-) -> dict:
+) -> dict[str, object]:
     """Busca la isócrona que minimiza chi² sobre un grid de edades.
 
     Si una edad no tiene archivo disponible, se avisa con `warnings.warn` y

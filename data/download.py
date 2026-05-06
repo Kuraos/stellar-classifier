@@ -14,11 +14,11 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-DATA_OUTPUT = Path(__file__).resolve().parent / "gaia_sample.csv"
-GAIA_TAP_SYNC_URL = "https://gea.esac.esa.int/tap-server/tap/sync"
-GAIA_REQUEST_TIMEOUT_SECONDS = 300
-GAIA_MAX_RETRIES = 3
-REQUIRED_COLUMNS = [
+DATA_OUTPUT: Path = Path(__file__).resolve().parent / "gaia_sample.csv"
+GAIA_TAP_SYNC_URL: str = "https://gea.esac.esa.int/tap-server/tap/sync"
+GAIA_REQUEST_TIMEOUT_SECONDS: int = 300
+GAIA_MAX_RETRIES: int = 3
+REQUIRED_COLUMNS: list[str] = [
     "source_id",
     "ra",
     "dec",
@@ -79,14 +79,14 @@ def _validate_required_columns(df: pd.DataFrame) -> None:
 
 def _build_query(n_stars: int, max_dist_pc: float, only_variables: bool = False) -> str:
     """Construye la consulta ADQL con filtros de calidad y el join astrofisico.
-    
+
     Si only_variables=True, usa INNER JOIN con vari_summary para obtener solo variables.
     """
     min_parallax = 1000.0 / max_dist_pc
-    
+
     # When only_variables, use INNER JOIN para filtrar; otherwise use LEFT JOIN
     vs_join = "INNER JOIN" if only_variables else "LEFT JOIN"
-    
+
     return f"""
     SELECT TOP {int(n_stars)}
         gs.source_id,

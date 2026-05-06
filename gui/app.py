@@ -14,6 +14,11 @@ from tkinter import messagebox, ttk
 import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
+from typing import Any, TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    import matplotlib.figure
+    import matplotlib.axes
 
 from data.download import query_gaia_sample
 from src.extinction import apply_extinction_correction, prime_bayestar_cache
@@ -44,6 +49,18 @@ from src.variables import add_variability_columns
 ISOCHRONES_DIR = Path(__file__).resolve().parent.parent / "data" / "isochrones"
 
 
+def _to_float(value: object) -> float | None:
+    """Convierte valores heterogeneos a float si es posible."""
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    return None
+
+
 class StellarClassifierApp:
     """Ventana principal y coordinadora del flujo de trabajo interactivo."""
 
@@ -66,9 +83,9 @@ class StellarClassifierApp:
         # Estado interno compartido entre descarga, procesamiento, tabla y grafico.
         self.df_raw: pd.DataFrame | None = None
         self.df_processed: pd.DataFrame | None = None
-        self.stats: dict | None = None
-        self.fig = None
-        self.ax = None
+        self.stats: dict[str, object] | None = None
+        self.fig: "matplotlib.figure.Figure | None" = None
+        self.ax: "matplotlib.axes.Axes | None" = None
 
         self._download_thread: threading.Thread | None = None
         self._bayestar_preload_thread: threading.Thread | None = None
@@ -78,8 +95,8 @@ class StellarClassifierApp:
         self._isochrones_error: str | None = None
         self._preload_bayestar = preload_bayestar
 
-        self.available_isochrones: list[dict] = []
-        self.active_isochrones: list[dict] = []
+        self.available_isochrones: list[dict[str, object]] = []
+        self.active_isochrones: list[dict[str, object]] = []
         self._isochrone_colors = ["tab:red", "tab:blue", "tab:green", "tab:orange", "tab:purple"]
         self.df_crossmatch: pd.DataFrame | None = None
         self.df_spectra_results: pd.DataFrame | None = None
@@ -88,7 +105,7 @@ class StellarClassifierApp:
         self._hr_kdtree_scale: np.ndarray | None = None
         self._hr_kdtree_source_ids: np.ndarray | None = None
         self._hr_kdtree_cols: tuple[str, str] | None = None
-        self._hr_selected_marker = None
+        self._hr_selected_marker: Any | None = None
         self._spectra_source_order: list[str] = []
         self._selected_spectrum_source_id: str | None = None
 
@@ -174,7 +191,7 @@ class StellarClassifierApp:
         self.detail_panel = DetailPanel(right_frame)
         self.detail_panel.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
         # Wire the plot selection callback to update the detail panel
-        self.plot_panel.on_point_selected = lambda info: self._on_point_selected(info)
+        self.plot_panel.on_point_selected = self._on_point_selected
 
         table_frame = ttk.LabelFrame(tab_hr, text="Tabla de datos")
         table_frame.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
@@ -285,10 +302,7 @@ class StellarClassifierApp:
             row_src = self.df_processed.loc[self.df_processed["source_id"].astype(str) == source_str]
             if not row_src.empty and "teff" in row_src.columns:
                 teff_raw = row_src.iloc[0].get("teff")
-                try:
-                    teff_phot = float(teff_raw)
-                except Exception:
-                    teff_phot = None
+                teff_phot = _to_float(teff_raw)
 
         self._selected_spectrum_source_id = source_str
         self._update_spectrum_navigation_state()
@@ -300,15 +314,17 @@ class StellarClassifierApp:
         def worker() -> None:
             from src.lamost import analyse_star_spectrum
 
+            obsid_safe: int | str = obsid if isinstance(obsid, (int, str)) else str(obsid)
+
             result = analyse_star_spectrum(
                 source_id=source_str,
-                obsid=obsid,
+                obsid=obsid_safe,
                 teff_photometric=teff_phot,
             )
             result["snrg"] = snrg
             result["class_lamost"] = class_lamost
             result["subclass_lamost"] = subclass_lamost
-            self.root.after(0, lambda r=result: self.spectroscopy_panel.show_spectrum(r))
+            self.root.after(0, lambda r=result: self.spectroscopy_panel.show_spectrum(r))  # type: ignore[misc]
             if result.get("success"):
                 self.root.after(0, lambda: self.spectroscopy_panel.set_status("espectro cargado"))
             else:
@@ -364,9 +380,9 @@ class StellarClassifierApp:
         row = self.df_processed.loc[self.df_processed["source_id"].astype(str) == str(source_id)]
         if row.empty:
             return
-        x = pd.to_numeric(row.iloc[0].get(teff_col), errors="coerce")
-        y = pd.to_numeric(row.iloc[0].get(mg_col), errors="coerce")
-        if not np.isfinite(x) or not np.isfinite(y):
+        x = _to_float(row.iloc[0].get(teff_col))
+        y = _to_float(row.iloc[0].get(mg_col))
+        if x is None or y is None or not np.isfinite(x) or not np.isfinite(y):
             return
 
         try:
@@ -428,13 +444,14 @@ class StellarClassifierApp:
             self.fig.canvas.mpl_disconnect(self._mpl_click_cid)
         self._mpl_click_cid = self.fig.canvas.mpl_connect("button_press_event", self._on_hr_click)
 
-    def _on_hr_click(self, event) -> None:
+    def _on_hr_click(self, event: object) -> None:
         """Atiende click en HR y muestra espectro si la estrella tiene match LAMOST."""
         if self.df_processed is None or self.df_processed.empty:
             return
         if self.df_crossmatch is None or self.df_crossmatch.empty:
             return
-        if event is None or event.xdata is None or event.ydata is None:
+        event_any = cast(Any, event)
+        if event_any is None or event_any.xdata is None or event_any.ydata is None:
             return
 
         if self._hr_kdtree is None or self._hr_kdtree_scale is None or self._hr_kdtree_source_ids is None:
@@ -442,7 +459,7 @@ class StellarClassifierApp:
         if self._hr_kdtree is None or self._hr_kdtree_scale is None or self._hr_kdtree_source_ids is None:
             return
 
-        click_norm = np.array([float(event.xdata), float(event.ydata)], dtype=float) / self._hr_kdtree_scale
+        click_norm = np.array([float(event_any.xdata), float(event_any.ydata)], dtype=float) / self._hr_kdtree_scale
         dist, idx = self._hr_kdtree.query(click_norm, k=1)
         if not np.isfinite(dist) or dist > self.HR_CLICK_TOLERANCE:
             return
@@ -455,6 +472,7 @@ class StellarClassifierApp:
         if self.df_processed is None or self.df_processed.empty:
             self.spectroscopy_panel.set_status("error: primero descarga y procesa datos")
             return
+        processed_df = self.df_processed
 
         self.spectroscopy_panel.set_status("buscando espectros en LAMOST...")
 
@@ -462,23 +480,31 @@ class StellarClassifierApp:
             from src.lamost import crossmatch_lamost
 
             try:
-                df_match = crossmatch_lamost(self.df_processed, radius_arcsec=2.0, max_stars=500)
+                df_match = crossmatch_lamost(processed_df, radius_arcsec=2.0, max_stars=500)
                 self.df_crossmatch = df_match
                 n = len(df_match)
                 source_order = [str(v) for v in df_match.get("source_id", pd.Series(dtype=object)).astype(str).tolist()]
                 # Mantener orden y evitar duplicados para navegacion estable.
                 self._spectra_source_order = list(dict.fromkeys(source_order))
                 self._selected_spectrum_source_id = self._spectra_source_order[0] if self._spectra_source_order else None
-                self.root.after(0, lambda d=df_match: self.spectroscopy_panel.set_crossmatch_results(d))
+                def _set_crossmatch_results() -> None:
+                    self.spectroscopy_panel.set_crossmatch_results(df_match)
+
+                self.root.after(0, _set_crossmatch_results)
                 self.root.after(0, self._update_spectrum_navigation_state)
-                self.root.after(0, lambda: self.spectroscopy_panel.set_status(
-                    f"cross-match listo: {n} estrellas con espectro LAMOST"
-                ))
+                def _set_crossmatch_status() -> None:
+                    self.spectroscopy_panel.set_status(f"cross-match listo: {n} estrellas con espectro LAMOST")
+
+                self.root.after(0, _set_crossmatch_status)
                 self.root.after(0, self._connect_hr_click)
                 self.root.after(0, self._refresh_hr_plot)
             except Exception as exc:
                 msg = str(exc)
-                self.root.after(0, lambda m=msg: self.spectroscopy_panel.set_status(f"error en cross-match: {m}"))
+
+                def _set_crossmatch_error() -> None:
+                    self.spectroscopy_panel.set_status(f"error en cross-match: {msg}")
+
+                self.root.after(0, _set_crossmatch_error)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -486,6 +512,11 @@ class StellarClassifierApp:
         """Lanza el analisis en lote en background con progreso."""
         if self.df_crossmatch is None or self.df_crossmatch.empty:
             self.spectroscopy_panel.set_status("error: primero busca espectros LAMOST")
+            return
+        crossmatch_df = self.df_crossmatch
+        processed_df = self.df_processed
+        if processed_df is None:
+            self.spectroscopy_panel.set_status("error: primero procesa datos")
             return
 
         def worker() -> None:
@@ -498,19 +529,24 @@ class StellarClassifierApp:
 
             try:
                 df_results = batch_analyse_spectra(
-                    self.df_crossmatch,
-                    self.df_processed,
+                    crossmatch_df,
+                    processed_df,
                     max_spectra=100,
                     progress_callback=progress,
                 )
                 self.df_spectra_results = df_results
                 n_ok = int(df_results["success"].sum()) if "success" in df_results.columns else 0
-                self.root.after(0, lambda: self.spectroscopy_panel.set_status(
-                    f"analisis listo: {n_ok} espectros procesados correctamente"
-                ))
+                def _set_batch_status() -> None:
+                    self.spectroscopy_panel.set_status(f"analisis listo: {n_ok} espectros procesados correctamente")
+
+                self.root.after(0, _set_batch_status)
             except Exception as exc:
                 msg = str(exc)
-                self.root.after(0, lambda m=msg: self.spectroscopy_panel.set_status(f"error en analisis: {m}"))
+
+                def _set_batch_error() -> None:
+                    self.spectroscopy_panel.set_status(f"error en analisis: {msg}")
+
+                self.root.after(0, _set_batch_error)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -699,6 +735,7 @@ class StellarClassifierApp:
         if self.df_processed is None or self.df_processed.empty:
             self._set_status("error: primero procesa datos")
             return
+        processed_df = self.df_processed
 
         if self._isochrones_thread and self._isochrones_thread.is_alive():
             self._set_status("espera a que termine la carga de isócronas")
@@ -709,24 +746,33 @@ class StellarClassifierApp:
         def worker() -> None:
             try:
                 result = fit_best_age(
-                    self.df_processed,
+                    processed_df,
                     age_grid=np.arange(7.0, 10.1, 0.1),
                     metallicity=0.0,
                     use_corrected=self.extinction_var.get(),
                     use_bayesian=self.bayesian_var.get(),
                     isochrones_dir=str(ISOCHRONES_DIR),
                 )
-                self.root.after(0, lambda: self._on_fit_best_age_success(result))
+                def _on_success() -> None:
+                    self._on_fit_best_age_success(result)
+
+                self.root.after(0, _on_success)
             except Exception as exc:
-                self.root.after(0, lambda: self._on_fit_best_age_error(str(exc)))
+                msg = str(exc)
+                def _on_error() -> None:
+                    self._on_fit_best_age_error(msg)
+
+                self.root.after(0, _on_error)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_fit_best_age_success(self, result: dict) -> None:
+    def _on_fit_best_age_success(self, result: dict[str, object]) -> None:
         """Muestra el resultado del ajuste y sobrepone la mejor isócrona."""
-        best_log_age = float(result["best_log_age"])
+        best_log_age_val = _to_float(result.get("best_log_age"))
+        best_log_age = best_log_age_val if best_log_age_val is not None else float("nan")
         best_label = str(result["best_age_label"])
-        chi2 = float(result["min_chi2"])
+        chi2_val = _to_float(result.get("min_chi2"))
+        chi2 = chi2_val if chi2_val is not None else float("nan")
         best_isochrone = result.get("best_isochrone")
 
         if isinstance(best_isochrone, pd.DataFrame) and not best_isochrone.empty:
@@ -758,12 +804,13 @@ class StellarClassifierApp:
         if self.df_processed is None or self.df_processed.empty:
             self._set_status("error: primero procesa datos")
             return
+        processed_df = self.df_processed
 
         self.variables_panel.set_status("Validando P-L en segundo plano...")
 
         def worker() -> None:
             try:
-                df = self.df_processed
+                df = processed_df
                 dist_col = (
                     "distance_pc_bayesian" if self.bayesian_var.get() and "distance_pc_bayesian" in df.columns else "distance_pc"
                 )
@@ -781,9 +828,11 @@ class StellarClassifierApp:
                     pl_vals = pd.to_numeric(df["distance_pc_PL"], errors="coerce").to_numpy(dtype=float)
                     ref_vals = pd.to_numeric(df[dist_col], errors="coerce").to_numpy(dtype=float)
                 except Exception as cast_exc:
-                    self.root.after(0, lambda: messagebox.showerror(
-                        "Error de validación", f"No se pudo convertir distancias: {cast_exc}"
-                    ))
+                    msg = str(cast_exc)
+                    def _show_cast_error() -> None:
+                        messagebox.showerror("Error de validación", f"No se pudo convertir distancias: {msg}")
+
+                    self.root.after(0, _show_cast_error)
                     return
 
                 mask = np.isfinite(pl_vals) & np.isfinite(ref_vals)
@@ -893,7 +942,7 @@ class StellarClassifierApp:
             # Bind the message into the lambda default to avoid referencing the
             # exception variable after the except block (it gets cleared).
             msg = str(exc)
-            self.root.after(100, lambda m=msg: self._on_download_error(m))
+            self.root.after(100, lambda m=msg: self._on_download_error(m))  # type: ignore[misc]
 
     def _on_download_success(self, df: pd.DataFrame) -> None:
         self.df_raw = df
@@ -942,7 +991,7 @@ class StellarClassifierApp:
         self._set_status(f"error: {message}")
         messagebox.showerror("Error de descarga", message)
 
-    def _on_point_selected(self, info: dict) -> None:
+    def _on_point_selected(self, info: dict[str, object]) -> None:
         """Actualiza el panel lateral con info de la estrella seleccionada."""
         try:
             if hasattr(self, "detail_panel") and self.detail_panel is not None:
@@ -1029,12 +1078,15 @@ class StellarClassifierApp:
             try:
                 df = add_variability_columns(df)
                 n_vars = int(df["is_variable"].sum()) if "is_variable" in df.columns else 0
+                def _set_variables_status() -> None:
+                    self.variables_panel.set_status(
+                        f"{n_vars} estrellas variables detectadas en la muestra"
+                        if n_vars > 0 else "Sin variables detectadas en esta muestra"
+                    )
+
                 self.root.after(
                     0,
-                    lambda n=n_vars: self.variables_panel.set_status(
-                        f"{n} estrellas variables detectadas en la muestra"
-                        if n > 0 else "Sin variables detectadas en esta muestra"
-                    ),
+                    _set_variables_status,
                 )
                 self.variables_panel.set_enabled(True)
             except Exception as var_exc:
@@ -1093,6 +1145,9 @@ class StellarClassifierApp:
 
         self._set_status("graficando diagrama HR...")
         try:
+            if self.fig is None:
+                self._set_status("error: figura HR no inicializada")
+                return
             self.fig.clf()
             self.ax = self.fig.add_subplot(111)
             if hasattr(self.plot_panel, "update_ax"):

@@ -6,6 +6,7 @@ from datetime import datetime
 from collections.abc import Callable
 import tkinter as tk
 from tkinter import ttk
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -16,14 +17,36 @@ from src.lamost import SPECTRAL_LINES as SPECTRAL_LINES_GUI
 from src.variables import VARIABLE_LABELS
 
 
+def _to_float(value: object) -> float | None:
+    """Convierte valores heterogeneos a float si es posible."""
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    return None
+
+
+def _as_float(value: object, default: float = 0.0) -> float:
+    """Devuelve float seguro con valor por defecto."""
+    parsed = _to_float(value)
+    return parsed if parsed is not None else default
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    """Devuelve int seguro con valor por defecto."""
+    parsed = _to_float(value)
+    return int(parsed) if parsed is not None else default
+
+
 def _safe_isfinite(value: object) -> bool:
     """Devuelve True solo para floats finitos; tolera None y strings."""
     if value is None:
         return False
-    try:
-        return bool(np.isfinite(float(value)))
-    except (TypeError, ValueError):
-        return False
+    number = _to_float(value)
+    return bool(number is not None and np.isfinite(number))
 
 
 class StatisticsPanel(ttk.LabelFrame):
@@ -109,47 +132,52 @@ class StatisticsPanel(ttk.LabelFrame):
         self.var_summary_var.set("")
         self.variables_frame.pack_forget()
 
-    def update_from_stats(self, stats: dict) -> None:
+    def update_from_stats(self, stats: dict[str, object]) -> None:
         """Actualiza labels a partir del diccionario de metricas."""
-        self.general_vars["n_stars"].set(f"N estrellas:      {stats['n_stars']:>6d}")
-        self.general_vars["teff_mean"].set(f"T_eff media:     {stats['teff']['mean']:>8.1f} K")
-        self.general_vars["teff_median"].set(f"T_eff mediana:   {stats['teff']['median']:>8.1f} K")
+        n_stars = _as_int(stats.get("n_stars", 0))
+        teff_stats = cast(dict[str, object], stats.get("teff", {}))
+        dist_stats = cast(dict[str, object], stats.get("distance_pc", {}))
+        lum_stats = cast(dict[str, object], stats.get("luminosity_solar", {}))
+
+        self.general_vars["n_stars"].set(f"N estrellas:      {n_stars:>6d}")
+        self.general_vars["teff_mean"].set(f"T_eff media:     {_as_float(teff_stats.get('mean', 0.0)):>8.1f} K")
+        self.general_vars["teff_median"].set(f"T_eff mediana:   {_as_float(teff_stats.get('median', 0.0)):>8.1f} K")
         self.general_vars["distance_mean"].set(
-            f"Distancia media: {stats['distance_pc']['mean']:>8.2f} pc"
+            f"Distancia media: {_as_float(dist_stats.get('mean', 0.0)):>8.2f} pc"
         )
         self.general_vars["luminosity_mean"].set(
-            f"Luminosidad med: {stats['luminosity_solar']['mean']:>8.3f} L_sun"
+            f"Luminosidad med: {_as_float(lum_stats.get('mean', 0.0)):>8.3f} L_sun"
         )
 
-        comparison = stats.get("distance_comparison") or {}
+        comparison = cast(dict[str, object], stats.get("distance_comparison") or {})
         if comparison:
             self.general_vars["distance_rescued"].set(
-                f"Rescatadas BJ: {int(comparison.get('n_recovered_by_bayesian', 0)):>6d}"
+                f"Rescatadas BJ: {_as_int(comparison.get('n_recovered_by_bayesian', 0)):>6d}"
             )
         else:
             self.general_vars["distance_rescued"].set("Rescatadas BJ:   -")
 
-        distribution = stats.get("spectral_distribution", {})
+        distribution = cast(dict[str, object], stats.get("spectral_distribution", {}))
         for key in self.spectral_vars:
-            self.spectral_vars[key].set(f"{key}: {int(distribution.get(key, 0))}")
+            self.spectral_vars[key].set(f"{key}: {_as_int(distribution.get(key, 0))}")
 
-        variability = stats.get("variability")
-        if variability and variability.get("n_variables", 0) > 0:
-            counts = variability.get("counts_by_type", {})
-            n_vars = int(variability.get("n_variables", 0))
-            n_total = int(stats.get("n_stars", 0))
+        variability = cast(dict[str, object], stats.get("variability") or {})
+        if variability and _as_int(variability.get("n_variables", 0)) > 0:
+            counts = cast(dict[str, object], variability.get("counts_by_type", {}))
+            n_vars = _as_int(variability.get("n_variables", 0))
+            n_total = n_stars
             fraction = 100.0 * n_vars / n_total if n_total > 0 else 0.0
-            n_pl = int(variability.get("n_with_pl_distance", 0))
+            n_pl = _as_int(variability.get("n_with_pl_distance", 0))
 
             lines = [f"Total: {n_vars} ({fraction:.1f}%)"]
             for tipo, count in counts.items():
                 tipo_str = str(tipo)
                 if tipo_str.lower() in {"non_variable", "nan", "none", ""}:
                     continue
-                if int(count) <= 0:
+                if _as_int(count) <= 0:
                     continue
                 label = VARIABLE_LABELS.get(tipo_str, tipo_str)
-                lines.append(f"  {label}: {int(count)}")
+                lines.append(f"  {label}: {_as_int(count)}")
             if n_pl > 0:
                 lines.append(f"Con dist. P-L: {n_pl}")
 
@@ -163,13 +191,19 @@ class StatisticsPanel(ttk.LabelFrame):
 class IsochronePanel(ttk.LabelFrame):
     """Panel para elegir, sobreponer y ajustar isócronas PARSEC."""
 
-    def __init__(self, parent: tk.Misc, on_overlay, on_clear, on_fit_age):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        on_overlay: Callable[[dict[str, object]], None],
+        on_clear: Callable[[], None],
+        on_fit_age: Callable[[], None],
+    ):
         super().__init__(parent, text="Isócronas PARSEC")
         self.on_overlay = on_overlay
         self.on_clear = on_clear
         self.on_fit_age = on_fit_age
-        self.available_isochrones: list[dict] = []
-        self._label_to_isochrone: dict[str, dict] = {}
+        self.available_isochrones: list[dict[str, object]] = []
+        self._label_to_isochrone: dict[str, dict[str, object]] = {}
 
         self.selected_var = tk.StringVar(value="Cargando isócronas...")
         self.status_var = tk.StringVar(value="Buscando archivos en data/isochrones/")
@@ -201,11 +235,11 @@ class IsochronePanel(ttk.LabelFrame):
         self.clear_btn.configure(state="disabled")
         self.fit_btn.configure(state="disabled")
 
-    def set_isochrones(self, isochrones: list[dict]) -> None:
+    def set_isochrones(self, isochrones: list[dict[str, object]]) -> None:
         """Carga las isócronas disponibles en el combo y habilita acciones."""
         self.available_isochrones = list(isochrones)
         self._label_to_isochrone = {
-            item["label_humano"]: item for item in self.available_isochrones
+            str(item["label_humano"]): item for item in self.available_isochrones
         }
 
         if not self.available_isochrones:
@@ -217,7 +251,7 @@ class IsochronePanel(ttk.LabelFrame):
             self.fit_btn.configure(state="disabled")
             return
 
-        values = [item["label_humano"] for item in self.available_isochrones]
+        values = [str(item["label_humano"]) for item in self.available_isochrones]
         self.combo.configure(values=values, state="readonly")
         self.selected_var.set(values[0])
         self.status_var.set(f"{len(values)} isócronas disponibles")
@@ -239,7 +273,7 @@ class IsochronePanel(ttk.LabelFrame):
         self.clear_btn.configure(state=btn_state)
         self.fit_btn.configure(state=btn_state)
 
-    def get_selected_isochrone(self) -> dict | None:
+    def get_selected_isochrone(self) -> dict[str, object] | None:
         """Devuelve el metadato de la isócrona seleccionada."""
         label = self.selected_var.get()
         return self._label_to_isochrone.get(label)
@@ -359,7 +393,7 @@ class DetailPanel(ttk.LabelFrame):
         self.text.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
         self.clear()
 
-    def set_details(self, info: dict) -> None:
+    def set_details(self, info: dict[str, object]) -> None:
         """Rellena el panel con un diccionario de campos.
 
         Espera un diccionario simple {col: value}.
@@ -593,12 +627,18 @@ class SpectroscopyPanel(ttk.Frame):
 
         self.type_var.set(f"Tipo espectral (EW): {spt}")
         if _safe_isfinite(teff_spec):
-            self.teff_spec_var.set(f"T_eff espectrosc.: {float(teff_spec):.0f} K")
+            teff_spec_f = _to_float(teff_spec)
+            self.teff_spec_var.set(
+                f"T_eff espectrosc.: {teff_spec_f:.0f} K" if teff_spec_f is not None else "T_eff espectrosc.: NaN"
+            )
         else:
             self.teff_spec_var.set("T_eff espectrosc.: NaN")
 
         if _safe_isfinite(teff_phot):
-            self.teff_phot_var.set(f"T_eff fotometrica: {float(teff_phot):.0f} K")
+            teff_phot_f = _to_float(teff_phot)
+            self.teff_phot_var.set(
+                f"T_eff fotometrica: {teff_phot_f:.0f} K" if teff_phot_f is not None else "T_eff fotometrica: -"
+            )
         else:
             self.teff_phot_var.set("T_eff fotometrica: -")
 
@@ -637,7 +677,7 @@ class DataTable(ttk.Frame):
         self.tree = ttk.Treeview(self, columns=keys, show="headings", height=10)
 
         for key, title, width in columns:
-            self.tree.heading(key, text=title, command=lambda c=key: self._sort_by_column(c))
+            self.tree.heading(key, text=title, command=lambda c=key: self._sort_by_column(c))  # type: ignore[misc]
             self.tree.column(key, width=width, anchor="center", stretch=True)
 
         self.scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.tree.yview)
@@ -649,14 +689,17 @@ class DataTable(ttk.Frame):
     def _format_value(self, value: object, column: str) -> str:
         if value is None:
             return ""
-        if pd.isna(value):
+        if bool(pd.isna(cast(Any, value))):
             return ""
         if column in {"ra", "dec"}:
-            return f"{float(value):.4f}"
+            num = _to_float(value)
+            return f"{num:.4f}" if num is not None else str(value)
         if column in {"bp_rp", "B_V", "M_G", "luminosity_solar"}:
-            return f"{float(value):.3f}"
+            num = _to_float(value)
+            return f"{num:.3f}" if num is not None else str(value)
         if column in {"teff", "distance_pc", "distance_display"}:
-            return f"{float(value):.2f}"
+            num = _to_float(value)
+            return f"{num:.2f}" if num is not None else str(value)
         return str(value)
 
     def _populate_rows(self, df: pd.DataFrame) -> None:

@@ -14,6 +14,7 @@ validación rápida en GUI; no sustituyen una calibración científica detallada
 from __future__ import annotations
 
 import re
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -62,7 +63,7 @@ VARIABLE_PLOT_STYLE: dict[str, dict[str, object]] = {
     "OTHER": {"marker": "X", "color": "gray", "zorder": 4, "size": 40},
 }
 
-PERIOD_LUMINOSITY_TYPES = {"DCEP", "T2CEP", "RRAB", "RRC"}
+PERIOD_LUMINOSITY_TYPES: set[str] = {"DCEP", "T2CEP", "RRAB", "RRC"}
 
 
 def _as_array(values: ArrayLike) -> np.ndarray:
@@ -85,9 +86,14 @@ def _finite_period(period_days: object) -> float:
     """Devuelve periodo positivo o NaN si no es util."""
     if period_days is None:
         return float("nan")
-    try:
+    if isinstance(period_days, (int, float, np.integer, np.floating)):
         period = float(period_days)
-    except Exception:
+    elif isinstance(period_days, str):
+        try:
+            period = float(period_days)
+        except Exception:
+            return float("nan")
+    else:
         return float("nan")
     if not np.isfinite(period) or period <= 0:
         return float("nan")
@@ -162,7 +168,7 @@ def cepheid_distance(g_mag: ArrayLike, period_days: ArrayLike, is_type2: bool = 
     distance_pc[~np.isfinite(distance_pc)] = np.nan
     distance_pc[~valid] = np.nan
     distance_pc[distance_pc <= 0] = np.nan
-    return distance_pc
+    return cast(np.ndarray, distance_pc)
 
 
 def rrlyrae_distance(
@@ -185,9 +191,6 @@ def rrlyrae_distance(
     if feh.size != n:
         feh = np.broadcast_to(feh, (n,))
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        log_period = np.log10(period)
-
     # Use a MV-[Fe/H] relation and approximate MV ~ MG for lack of band conversion
     valid = np.isfinite(g) & np.isfinite(period) & np.isfinite(feh) & (period > 0)
     m_abs = np.full(n, np.nan, dtype=float)
@@ -201,7 +204,7 @@ def rrlyrae_distance(
     distance_pc[~np.isfinite(distance_pc)] = np.nan
     distance_pc[~valid] = np.nan
     distance_pc[distance_pc <= 0] = np.nan
-    return distance_pc
+    return cast(np.ndarray, distance_pc)
 
 
 def _apparent_g_magnitude(df: pd.DataFrame) -> np.ndarray:
@@ -299,7 +302,7 @@ def compare_distances(
     df: pd.DataFrame,
     distance_col: str = "distance_pc",
     pl_col: str = "distance_pc_PL",
-) -> dict:
+) -> dict[str, object]:
     """Compara distancias P-L contra una columna de referencia.
 
     Devuelve un resumen con número de objetos comparados y estadísticas de la

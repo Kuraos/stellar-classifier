@@ -82,7 +82,7 @@ def fit_absorption_line(
     flux: ArrayLike,
     center_guess: float | None = None,
     window: float = 5.0,
-) -> dict:
+) -> dict[str, object]:
     """Ajusta una linea de absorcion con perfil gaussiano.
 
     Parametros:
