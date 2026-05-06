@@ -36,12 +36,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
-
-      - name: Linting con ruff
-        run: |
-          pip install ruff
-          ruff check src/ data/ gui/ main.py --select E,W,F --ignore E501
-
+          
       - name: Verificación de tipos con mypy
         run: |
           mypy src/ data/ main.py

@@ -138,7 +138,7 @@ espectroscopica complementaria al pipeline fotometrico de Gaia.
 - Estimacion de `T_eff` espectroscopica con relacion empirica simple de Gray (2008):
 
 ```
-T_eff ~= 9000 * exp(-0.18 * W_Halpha) + 3500
+T_eff ~= 456·W + 4180
 ```
 
 - Validacion cruzada contra `T_eff` fotometrica (Ballesteros 2012).
